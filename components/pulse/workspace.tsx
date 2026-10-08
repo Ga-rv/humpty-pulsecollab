@@ -1,7 +1,6 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Zap } from 'lucide-react'
 import {
   INITIAL_DM_USER_IDS,
   MAIN_ROOM_ID,
@@ -235,19 +234,9 @@ export function Workspace() {
           onSynthesize={handleSynthesize}
           onAddContext={() => setContextOpen(true)}
           onOpenSidebar={() => setSidebarOpen(true)}
+          drawerOpen={drawerOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
         />
-
-        {!drawerOpen && (
-          <button
-            type="button"
-            onClick={() => setDrawerOpen(true)}
-            className="absolute right-3 top-2.5 inline-flex h-8 items-center gap-1.5 rounded-lg border border-pulse/30 bg-pulse-soft px-2.5 text-xs font-semibold text-pulse transition-colors hover:border-pulse/60"
-          >
-            <Zap className="size-3.5 fill-pulse" aria-hidden="true" />
-            <span className="hidden sm:inline">Pulse</span>
-            <span className="sr-only sm:hidden">Open Pulse</span>
-          </button>
-        )}
 
         <PulseDrawer
           open={drawerOpen}

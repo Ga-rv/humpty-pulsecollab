@@ -22,6 +22,8 @@ interface ChatStreamProps {
   onSynthesize: () => void
   onAddContext: () => void
   onOpenSidebar: () => void
+  drawerOpen: boolean
+  onOpenDrawer: () => void
 }
 
 export function ChatStream({
@@ -38,6 +40,8 @@ export function ChatStream({
   onSynthesize,
   onAddContext,
   onOpenSidebar,
+  drawerOpen,
+  onOpenDrawer,
 }: ChatStreamProps) {
   const [draft, setDraft] = useState('')
   const feedRef = useRef<HTMLDivElement>(null)
@@ -61,27 +65,29 @@ export function ChatStream({
 
   return (
     <section aria-label={`Conversation: ${room.name}`} className="flex min-w-0 flex-1 flex-col bg-background">
-      <header className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border bg-panel px-3 py-2">
-        <button
-          type="button"
-          onClick={onOpenSidebar}
-          aria-label="Open navigation"
-          className="inline-flex size-8 items-center justify-center rounded-lg border border-border text-muted-foreground hover:text-foreground md:hidden"
-        >
-          <Menu className="size-4" aria-hidden="true" />
-        </button>
+      <header className="flex flex-row items-center justify-between w-full h-14 px-4 border-b border-[var(--border)] bg-[var(--background)]">
+        <div className="flex items-center gap-3 min-w-0 overflow-hidden">
+          <button
+            type="button"
+            onClick={onOpenSidebar}
+            aria-label="Open navigation"
+            className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground hover:text-foreground md:hidden"
+          >
+            <Menu className="size-4" aria-hidden="true" />
+          </button>
 
-        <h1 className="flex items-center gap-1 text-sm font-semibold text-foreground">
-          {isChannel && <Hash className="size-4 text-muted-foreground" aria-hidden="true" />}
-          {room.name}
-        </h1>
+          <h1 className="flex min-w-0 items-center gap-1 text-sm font-semibold text-foreground">
+            {isChannel && <Hash className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
+            <span className="truncate">{room.name}</span>
+          </h1>
 
-        <span className="hidden max-w-full truncate rounded-full border border-border bg-panel-2 px-2.5 py-0.5 font-mono text-[11px] text-muted-foreground sm:inline-flex">
-          {room.context}
-        </span>
+          <span className="hidden min-w-0 truncate rounded-full border border-border bg-panel-2 px-2.5 py-0.5 font-mono text-[11px] text-muted-foreground sm:inline-block">
+            {room.context}
+          </span>
+        </div>
 
-        <div className="ml-auto flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+        <div className="flex items-center gap-3 shrink-0 ml-auto">
+          <span className="hidden items-center gap-1.5 whitespace-nowrap font-mono text-[11px] text-muted-foreground sm:inline-flex">
             <span
               className={cn(
                 'size-1.5 rounded-full',
@@ -99,6 +105,17 @@ export function ChatStream({
             <Plus className="size-3.5" aria-hidden="true" />
             Add Context
           </button>
+          {!drawerOpen && (
+            <button
+              type="button"
+              onClick={onOpenDrawer}
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-pulse/30 bg-pulse-soft px-2.5 text-xs font-semibold text-pulse transition-colors hover:border-pulse/60"
+            >
+              <Zap className="size-3.5 fill-pulse" aria-hidden="true" />
+              <span className="hidden sm:inline">Pulse</span>
+              <span className="sr-only sm:hidden">Open Pulse</span>
+            </button>
+          )}
         </div>
       </header>
 
