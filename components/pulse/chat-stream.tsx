@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, Hash, Menu, Plus, Send, Zap } from 'lucide-react'
+import { ChevronDown, Hash, Menu, MessageSquare, Plus, Send, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MAIN_ROOM_ID, ME_ID, USERS } from '@/lib/pulse/data'
 import { SCOPE_LABEL } from '@/lib/pulse/types'
@@ -11,7 +11,7 @@ import { MessageItem } from './message-item'
 interface ChatStreamProps {
   room: Room
   messages: Message[]
-  session: Session
+  session: Session | null
   pulseActive: boolean
   scanning: boolean
   scanKey: number
@@ -23,7 +23,7 @@ interface ChatStreamProps {
   onAddContext: () => void
   onOpenSidebar: () => void
   drawerOpen: boolean
-  onOpenDrawer: () => void
+  onToggleDrawer: () => void
   onTyping?: () => void
   onStopTyping?: () => void
 }
@@ -43,7 +43,7 @@ export function ChatStream({
   onAddContext,
   onOpenSidebar,
   drawerOpen,
-  onOpenDrawer,
+  onToggleDrawer,
   onTyping,
   onStopTyping,
 }: ChatStreamProps) {
@@ -77,6 +77,9 @@ export function ChatStream({
     setDraft('')
   }
 
+  const currentUserName = session?.name || 'Guest User'
+  const currentUserInitials = session?.initials || 'GU'
+
   const typingUser = typingUserId ? (USERS[typingUserId] || { name: typingUserId }) : null
   const isChannel = room.type === 'channel'
   const dmUser = room.userId ? USERS[room.userId] : null
@@ -95,7 +98,11 @@ export function ChatStream({
           </button>
 
           <h1 className="flex min-w-0 items-center gap-1 text-sm font-semibold text-foreground">
-            {isChannel && <Hash className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
+            {isChannel ? (
+              <Hash className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+            ) : (
+              <MessageSquare className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+            )}
             <span className="truncate">{room.name}</span>
           </h1>
 
@@ -123,17 +130,22 @@ export function ChatStream({
             <Plus className="size-3.5" aria-hidden="true" />
             Add Context
           </button>
-          {!drawerOpen && (
-            <button
-              type="button"
-              onClick={onOpenDrawer}
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-pulse/30 bg-pulse-soft px-2.5 text-xs font-semibold text-pulse transition-colors hover:border-pulse/60"
-            >
-              <Zap className="size-3.5 fill-pulse" aria-hidden="true" />
-              <span className="hidden sm:inline">Pulse</span>
-              <span className="sr-only sm:hidden">Open Pulse</span>
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={onToggleDrawer}
+            aria-pressed={drawerOpen}
+            aria-label={drawerOpen ? 'Close Pulse drawer' : 'Open Pulse drawer'}
+            className={cn(
+              'inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors',
+              drawerOpen
+                ? 'border-pulse bg-pulse text-background'
+                : 'border-pulse/30 bg-pulse-soft text-pulse hover:border-pulse/60',
+            )}
+          >
+            <Zap className={cn('size-3.5', drawerOpen ? 'fill-background' : 'fill-pulse')} aria-hidden="true" />
+            <span className="hidden sm:inline">Pulse</span>
+            <span className="sr-only sm:hidden">Pulse</span>
+          </button>
         </div>
       </header>
 
@@ -141,9 +153,22 @@ export function ChatStream({
         {scanning && <div key={scanKey} className="scan-line" aria-hidden="true" />}
         <div ref={feedRef} className="h-full overflow-y-auto px-3 py-3 sm:px-4">
           {messages.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center gap-1 text-center">
-              <p className="text-sm font-medium text-foreground">Start of your conversation with {room.name}</p>
-              <p className="text-xs text-muted-foreground">Messages you send here stay in this thread.</p>
+            <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+              <div className="flex size-10 items-center justify-center rounded-full border border-border bg-panel-2">
+                {isChannel ? (
+                  <Hash className="size-5 text-muted-foreground" aria-hidden="true" />
+                ) : (
+                  <MessageSquare className="size-5 text-muted-foreground" aria-hidden="true" />
+                )}
+              </div>
+              <p className="text-sm font-medium text-foreground">
+                {isChannel ? `Welcome to #${room.name}` : `No direct messages yet`}
+              </p>
+              <p className="max-w-xs text-xs text-muted-foreground">
+                {isChannel
+                  ? 'Start the discussion below.'
+                  : `Start a conversation with ${room.name}.`}
+              </p>
             </div>
           ) : (
             <ol
@@ -153,7 +178,10 @@ export function ChatStream({
               className="flex flex-col gap-2"
             >
               {messages.map((message) => {
-                const outgoing = message.authorId === ME_ID || message.authorId === session.name
+                const outgoing =
+                  message.authorId === currentUserName ||
+                  message.authorId === ME_ID ||
+                  message.authorId === 'guest'
                 const author = USERS[message.authorId] ?? {
                   id: message.authorId,
                   name: message.authorId,
@@ -165,8 +193,8 @@ export function ChatStream({
                     key={message.id}
                     message={message}
                     author={author}
-                    displayName={outgoing ? session.name : author.name}
-                    displayInitials={outgoing ? session.initials : author.initials}
+                    displayName={outgoing ? currentUserName : author.name}
+                    displayInitials={outgoing ? currentUserInitials : author.initials}
                     outgoing={outgoing}
                     highlighted={pulseActive && room.id === MAIN_ROOM_ID && !!message.pulseKind}
                   />

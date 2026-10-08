@@ -14,25 +14,6 @@ interface ActionsTabProps {
   decisions?: string[]
 }
 
-const DEFAULT_ACTION_ITEMS = [
-  {
-    key: 'action-mongo',
-    title: 'Complete MongoDB Atlas schemas & Express Auth',
-    assignee: 'Rahul Sharma',
-    initials: 'RS',
-    owner: 'Rahul',
-    due: '9:00 PM Tonight',
-  },
-  {
-    key: 'action-socket',
-    title: 'Wire v0 React client to Socket.IO listeners',
-    assignee: 'Aman Verma',
-    initials: 'AV',
-    owner: 'Aman',
-    due: 'Immediate',
-  },
-]
-
 function getInitials(name: string): string {
   const parts = name.split(/\s+/).filter(Boolean)
   if (parts.length === 0) return 'U'
@@ -47,8 +28,23 @@ export function ActionsTab({
   unresolved,
   decisions,
 }: ActionsTabProps) {
-  const hasDynamic = Boolean(actionItems && actionItems.length > 0)
-  const itemsToRender = hasDynamic
+  const hasActions = Boolean(actionItems && actionItems.length > 0)
+  const hasUnresolved = Boolean(unresolved && unresolved.length > 0)
+  const hasDecisions = Boolean(decisions && decisions.length > 0)
+
+  if (!hasActions && !hasUnresolved && !hasDecisions) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border p-6 text-center">
+        <CheckCircle2 className="size-6 text-muted-foreground" aria-hidden="true" />
+        <p className="text-xs font-medium text-foreground">No action items synthesized yet</p>
+        <p className="max-w-[240px] font-mono text-[11px] text-muted-foreground">
+          Click ⚡ Synthesize Pulse in the chat area to extract action items, tasks, and open questions.
+        </p>
+      </div>
+    )
+  }
+
+  const itemsToRender = hasActions
     ? actionItems!.map((item, idx) => ({
         key: `dyn-action-${idx}-${item.task.slice(0, 20).toLowerCase().replace(/\s+/g, '-')}`,
         title: item.task,
@@ -57,15 +53,11 @@ export function ActionsTab({
         owner: item.assignee || 'Unassigned',
         due: item.deadline || 'Pending',
       }))
-    : DEFAULT_ACTION_ITEMS
-
-  const unresolvedToRender = unresolved && unresolved.length > 0
-    ? unresolved
-    : ['Who is preparing the Loom demo video and slide deck?']
+    : []
 
   return (
     <div className="flex flex-col gap-2.5">
-      {decisions && decisions.length > 0 && (
+      {hasDecisions && (
         <section aria-labelledby="decisions-heading" className="mb-1">
           <h3
             id="decisions-heading"
@@ -75,7 +67,7 @@ export function ActionsTab({
             Key Decisions Made
           </h3>
           <div className="flex flex-col gap-1.5">
-            {decisions.map((decision, idx) => (
+            {decisions!.map((decision, idx) => (
               <PulseCard key={`decision-${idx}`} className="border-ok/30 bg-ok/5 py-2">
                 <p className="text-[12px] leading-snug text-foreground">{decision}</p>
               </PulseCard>
@@ -106,42 +98,44 @@ export function ActionsTab({
         </PulseCard>
       ))}
 
-      <section aria-labelledby="unresolved-heading" className="mt-1">
-        <h3
-          id="unresolved-heading"
-          className="mb-1.5 flex items-center gap-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
-        >
-          <CircleHelp className="size-3.5 text-pulse" aria-hidden="true" />
-          Unresolved
-        </h3>
-        <div className="flex flex-col gap-2">
-          {unresolvedToRender.map((question, idx) => {
-            const key = `unresolved-${idx}`
-            return (
-              <PulseCard key={key} className="border-dashed border-pulse/30">
-                <p className="text-[13px] leading-snug text-foreground">{question}</p>
-                <p className="font-mono text-[11px] text-muted-foreground">Identified by PulseCollab AI</p>
-                <div className="flex">
-                  <ActionButton
-                    onClick={() =>
-                      onConvert(
-                        key,
-                        question.startsWith('Who') ? question : `Resolve: ${question}`,
-                        currentUserName.split(' ')[0]
-                      )
-                    }
-                    active={converted[key]}
-                    activeLabel="Assigned to you"
-                    icon={<UserPlus className="size-3.5" aria-hidden="true" />}
-                  >
-                    Assign to Me
-                  </ActionButton>
-                </div>
-              </PulseCard>
-            )
-          })}
-        </div>
-      </section>
+      {hasUnresolved && (
+        <section aria-labelledby="unresolved-heading" className="mt-1">
+          <h3
+            id="unresolved-heading"
+            className="mb-1.5 flex items-center gap-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
+          >
+            <CircleHelp className="size-3.5 text-pulse" aria-hidden="true" />
+            Unresolved
+          </h3>
+          <div className="flex flex-col gap-2">
+            {unresolved!.map((question, idx) => {
+              const key = `unresolved-${idx}`
+              return (
+                <PulseCard key={key} className="border-dashed border-pulse/30">
+                  <p className="text-[13px] leading-snug text-foreground">{question}</p>
+                  <p className="font-mono text-[11px] text-muted-foreground">Identified by PulseCollab AI</p>
+                  <div className="flex">
+                    <ActionButton
+                      onClick={() =>
+                        onConvert(
+                          key,
+                          question.startsWith('Who') ? question : `Resolve: ${question}`,
+                          currentUserName.split(' ')[0]
+                        )
+                      }
+                      active={converted[key]}
+                      activeLabel="Assigned to you"
+                      icon={<UserPlus className="size-3.5" aria-hidden="true" />}
+                    >
+                      Assign to Me
+                    </ActionButton>
+                  </div>
+                </PulseCard>
+              )
+            })}
+          </div>
+        </section>
+      )}
     </div>
   )
 }

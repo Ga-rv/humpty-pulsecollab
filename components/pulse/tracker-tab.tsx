@@ -1,6 +1,6 @@
 'use client'
 
-import { Check } from 'lucide-react'
+import { Check, ClipboardList } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { TrackerTask } from '@/lib/pulse/types'
 
@@ -10,6 +10,18 @@ interface TrackerTabProps {
 }
 
 export function TrackerTab({ tasks, onToggle }: TrackerTabProps) {
+  if (tasks.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border p-6 text-center">
+        <ClipboardList className="size-6 text-muted-foreground" aria-hidden="true" />
+        <p className="text-xs font-medium text-foreground">No tasks in tracker yet</p>
+        <p className="max-w-[240px] font-mono text-[11px] text-muted-foreground">
+          Convert action items or deadlines from the Pulse drawer to track their status.
+        </p>
+      </div>
+    )
+  }
+
   const doneCount = tasks.filter((task) => task.done).length
   const percent = tasks.length ? Math.round((doneCount / tasks.length) * 100) : 0
 

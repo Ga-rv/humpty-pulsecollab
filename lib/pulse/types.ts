@@ -14,6 +14,7 @@ export interface Session {
   email: string
   role: string
   token?: string
+  isGuest?: boolean
 }
 
 export interface Room {

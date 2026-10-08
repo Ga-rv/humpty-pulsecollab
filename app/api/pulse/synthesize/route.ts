@@ -3,7 +3,7 @@ import { GoogleGenAI } from '@google/genai'
 import { connectToDatabase } from '@/lib/mongodb'
 import { Message } from '@/models/Message'
 import { Conversation } from '@/models/Conversation'
-import { CHANNELS, SEED_MESSAGES, getRoom } from '@/lib/pulse/data'
+import { CHANNELS, getRoom } from '@/lib/pulse/data'
 import mongoose from 'mongoose'
 
 interface ActionItem {
@@ -114,14 +114,6 @@ export async function POST(request: NextRequest) {
       console.warn('MongoDB message lookup skipped/failed:', e)
     }
 
-    // Fallback to seed messages if database has no messages yet
-    if (messagesList.length === 0 && SEED_MESSAGES[conversationId]) {
-      messagesList = SEED_MESSAGES[conversationId].map((m) => ({
-        sender: m.authorId,
-        content: m.text,
-        time: m.time,
-      }))
-    }
 
     const messagesText =
       messagesList.length > 0

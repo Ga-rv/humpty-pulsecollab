@@ -1,6 +1,6 @@
 'use client'
 
-import { Hash, LogOut, Plus, Zap } from 'lucide-react'
+import { Hash, LogIn, LogOut, Plus, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CHANNELS, USERS } from '@/lib/pulse/data'
 import type { Session } from '@/lib/pulse/types'
@@ -11,11 +11,12 @@ interface SidebarProps {
   activeRoomId: string
   unread: Record<string, number>
   dmUserIds: string[]
-  session: Session
+  session: Session | null
   onSelectRoom: (roomId: string) => void
   onNewChat: () => void
   onOpenAuth: () => void
   onClose: () => void
+  onSignOut?: () => void
 }
 
 function UnreadBadge({ count }: { count: number }) {
@@ -38,7 +39,10 @@ export function Sidebar({
   onNewChat,
   onOpenAuth,
   onClose,
+  onSignOut,
 }: SidebarProps) {
+  const isGuest = !session || session.isGuest
+
   return (
     <>
       {open && (
@@ -118,58 +122,89 @@ export function Sidebar({
                 New Chat
               </button>
             </div>
-            <ul className="flex flex-col gap-0.5">
-              {dmUserIds.map((userId) => {
-                const user = USERS[userId]
-                if (!user) return null
-                const roomId = `dm-${userId}`
-                const active = roomId === activeRoomId
-                return (
-                  <li key={userId}>
-                    <button
-                      type="button"
-                      onClick={() => onSelectRoom(roomId)}
-                      aria-current={active ? 'page' : undefined}
-                      className={cn(
-                        'flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left text-[13px] transition-colors',
-                        active
-                          ? 'border-border bg-panel-2 font-medium text-foreground'
-                          : 'border-transparent text-muted-foreground hover:bg-panel-2/60 hover:text-foreground',
-                        !active && unread[roomId] ? 'text-foreground' : '',
-                      )}
-                    >
-                      <Avatar initials={user.initials} size="sm" online={user.online} showPresence />
-                      <span className="truncate">
-                        {user.name}
-                        {user.role && <span className="text-muted-foreground"> ({user.role})</span>}
-                      </span>
-                      <span className="sr-only">{user.online ? 'Online' : 'Offline'}</span>
-                      {!active && <UnreadBadge count={unread[roomId] ?? 0} />}
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
+            {dmUserIds.length === 0 ? (
+              <p className="px-2 py-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                No direct messages yet. Start a conversation with a teammate.
+              </p>
+            ) : (
+              <ul className="flex flex-col gap-0.5">
+                {dmUserIds.map((userId) => {
+                  const user = USERS[userId] ?? {
+                    id: userId,
+                    name: userId,
+                    initials: userId.slice(0, 2).toUpperCase(),
+                    online: false,
+                  }
+                  const roomId = `dm-${userId}`
+                  const active = roomId === activeRoomId
+                  return (
+                    <li key={userId}>
+                      <button
+                        type="button"
+                        onClick={() => onSelectRoom(roomId)}
+                        aria-current={active ? 'page' : undefined}
+                        className={cn(
+                          'flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left text-[13px] transition-colors',
+                          active
+                            ? 'border-border bg-panel-2 font-medium text-foreground'
+                            : 'border-transparent text-muted-foreground hover:bg-panel-2/60 hover:text-foreground',
+                          !active && unread[roomId] ? 'text-foreground' : '',
+                        )}
+                      >
+                        <Avatar initials={user.initials} size="sm" online={user.online} showPresence />
+                        <span className="truncate">
+                          {user.name}
+                          {user.role && <span className="text-muted-foreground"> ({user.role})</span>}
+                        </span>
+                        <span className="sr-only">{user.online ? 'Online' : 'Offline'}</span>
+                        {!active && <UnreadBadge count={unread[roomId] ?? 0} />}
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
           </section>
         </nav>
 
-        <div className="flex items-center gap-2 border-t border-border p-2.5">
-          <Avatar initials={session.initials} showPresence online />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[13px] font-medium text-foreground">{session.name}</p>
-            <span className="mt-0.5 inline-flex rounded-full border border-border bg-panel-2 px-1.5 py-px font-mono text-[10px] text-muted-foreground">
-              {session.role}
-            </span>
+        {isGuest ? (
+          <div className="flex flex-col gap-2 border-t border-border p-2.5">
+            <div className="flex items-center gap-2">
+              <Avatar initials="GU" size="sm" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[13px] font-medium text-foreground">Guest User</p>
+                <p className="truncate font-mono text-[10px] text-muted-foreground">Not signed in</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenAuth}
+              className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-lg bg-pulse px-3 text-xs font-semibold text-background transition-opacity hover:opacity-90"
+            >
+              <LogIn className="size-3.5" aria-hidden="true" />
+              Sign In / Register
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={onOpenAuth}
-            aria-label="Sign out or switch account"
-            className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:text-foreground"
-          >
-            <LogOut className="size-4" aria-hidden="true" />
-          </button>
-        </div>
+        ) : (
+          <div className="flex items-center gap-2 border-t border-border p-2.5">
+            <Avatar initials={session.initials} showPresence online />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[13px] font-medium text-foreground">{session.name}</p>
+              <span className="mt-0.5 inline-flex rounded-full border border-border bg-panel-2 px-1.5 py-px font-mono text-[10px] text-muted-foreground">
+                {session.role}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={onSignOut || onOpenAuth}
+              aria-label="Sign out"
+              title="Sign out"
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:text-foreground"
+            >
+              <LogOut className="size-4" aria-hidden="true" />
+            </button>
+          </div>
+        )}
       </aside>
     </>
   )

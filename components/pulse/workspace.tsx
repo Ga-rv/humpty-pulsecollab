@@ -3,14 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 import {
-  INITIAL_DM_USER_IDS,
   MAIN_ROOM_ID,
-  ME_ID,
-  REPLIES,
-  SEED_MESSAGES,
-  SEED_TRACKER,
-  SEED_UNREAD,
-  USERS,
   formatTime,
   getRoom,
 } from '@/lib/pulse/data'
@@ -29,15 +22,13 @@ import { NewChatModal } from './new-chat-modal'
 import { PulseDrawer } from './pulse-drawer'
 import { Sidebar } from './sidebar'
 
-const DEFAULT_SESSION: Session = {
-  name: USERS[ME_ID].name,
-  initials: USERS[ME_ID].initials,
-  email: 'arpit@campus.edu',
-  role: 'Lead Dev',
+const GUEST_SESSION: Session = {
+  name: 'Guest User',
+  initials: 'GU',
+  email: '',
+  role: 'Guest',
+  isGuest: true,
 }
-
-const TYPING_DELAY_MS = 600
-const REPLY_DELAY_MS = 2200
 
 function toTitleCase(value: string) {
   return value
@@ -53,19 +44,19 @@ function toInitials(name: string) {
     .filter(Boolean)
     .map((part) => part[0])
     .join('')
-  return letters.slice(0, 2).toUpperCase() || 'ME'
+  return letters.slice(0, 2).toUpperCase() || 'GU'
 }
 
 export function Workspace() {
-  const [session, setSession] = useState<Session>(DEFAULT_SESSION)
+  const [session, setSession] = useState<Session | null>(GUEST_SESSION)
   const [activeRoomId, setActiveRoomId] = useState(MAIN_ROOM_ID)
-  const [messages, setMessages] = useState<Record<string, Message[]>>(SEED_MESSAGES)
-  const [unread, setUnread] = useState<Record<string, number>>(SEED_UNREAD)
-  const [dmUserIds, setDmUserIds] = useState<string[]>(INITIAL_DM_USER_IDS)
+  const [messages, setMessages] = useState<Record<string, Message[]>>({})
+  const [unread, setUnread] = useState<Record<string, number>>({})
+  const [dmUserIds, setDmUserIds] = useState<string[]>([])
   const [typing, setTyping] = useState<{ roomId: string; userId: string } | null>(null)
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [drawerOpen, setDrawerOpen] = useState(true)
+  const [drawerOpen, setDrawerOpen] = useState(false)
   const [tab, setTab] = useState<PulseTab>('deadlines')
   const [scope, setScope] = useState<ScanScope>('last-50')
   const [scanning, setScanning] = useState(false)
@@ -73,7 +64,7 @@ export function Workspace() {
   const [pulseActive, setPulseActive] = useState(false)
   const [syncedAt, setSyncedAt] = useState<number | null>(null)
   const [converted, setConverted] = useState<Record<string, boolean>>({})
-  const [tracker, setTracker] = useState<TrackerTask[]>(SEED_TRACKER)
+  const [tracker, setTracker] = useState<TrackerTask[]>([])
   const [synthesisData, setSynthesisData] = useState<PulseSynthesisData | null>(null)
 
   const [authOpen, setAuthOpen] = useState(false)
@@ -91,8 +82,6 @@ export function Workspace() {
 
   // Initialize Socket.IO connection
   useEffect(() => {
-    if (window.innerWidth < 1280) setDrawerOpen(false)
-
     const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || window.location.origin
     const socket = io(socketUrl, {
       transports: ['websocket', 'polling'],
@@ -157,7 +146,7 @@ export function Workspace() {
     fetch(`/api/messages?conversationId=${encodeURIComponent(activeRoomId)}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data?.messages && Array.isArray(data.messages) && data.messages.length > 0) {
+        if (data?.messages && Array.isArray(data.messages)) {
           interface DbMsg {
             _id?: string
             id?: string
@@ -173,16 +162,10 @@ export function Workspace() {
             text: m.content,
             time: formatTime(new Date(m.createdAt)),
           }))
-          setMessages((curr) => {
-            const currentRoomMsgs = curr[activeRoomId] ?? []
-            const merged = [...currentRoomMsgs]
-            for (const dm of dbMsgs) {
-              if (!merged.some((m) => m.id === dm.id || (m.text === dm.text && m.authorId === dm.authorId))) {
-                merged.push(dm)
-              }
-            }
-            return { ...curr, [activeRoomId]: merged }
-          })
+          setMessages((curr) => ({
+            ...curr,
+            [activeRoomId]: dbMsgs,
+          }))
         }
       })
       .catch(() => {})
@@ -208,23 +191,11 @@ export function Workspace() {
             deadline: t.deadline,
             fromPulse: true,
           }))
-          setTracker((curr) => {
-            const merged = [...dbTasks]
-            for (const ct of curr) {
-              if (!merged.some((t) => t.id === ct.id || t.title === ct.title)) {
-                merged.push(ct)
-              }
-            }
-            return merged
-          })
+          setTracker(dbTasks)
         }
       })
       .catch(() => {})
   }, [activeRoomId])
-
-  const schedule = useCallback((callback: () => void, delay: number) => {
-    timers.current.push(setTimeout(callback, delay))
-  }, [])
 
   const nextId = useCallback((prefix: string) => {
     idCounter.current += 1
@@ -248,6 +219,8 @@ export function Workspace() {
     setSidebarOpen(false)
   }, [])
 
+  const currentUserName = session?.name || 'Guest User'
+
   const handleSend = useCallback(
     (text: string) => {
       const room = getRoom(activeRoomId)
@@ -258,7 +231,7 @@ export function Workspace() {
       const outgoingMessage: Message = {
         id: msgId,
         roomId,
-        authorId: ME_ID,
+        authorId: currentUserName,
         text,
         time,
       }
@@ -271,8 +244,8 @@ export function Workspace() {
           id: msgId,
           roomId,
           conversationId: roomId,
-          authorId: ME_ID,
-          sender: session.name,
+          authorId: currentUserName,
+          sender: currentUserName,
           content: text,
           text,
           time,
@@ -285,60 +258,23 @@ export function Workspace() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           conversationId: roomId,
-          sender: session.name,
+          sender: currentUserName,
           content: text,
         }),
       }).catch((err) => console.warn('Failed to persist message to DB:', err))
-
-      // Keep mock peer responses if in demo channels
-      const replies = REPLIES[room.responderId]
-      if (!replies) return
-
-      schedule(() => setTyping({ roomId, userId: room.responderId }), TYPING_DELAY_MS)
-      schedule(() => {
-        setTyping(null)
-        const replyText = replies[Math.floor(Math.random() * replies.length)]
-        const replyId = nextId('reply')
-        const replyTime = formatTime()
-
-        const replyMsg: Message = {
-          id: replyId,
-          roomId,
-          authorId: room.responderId,
-          text: replyText,
-          time: replyTime,
-        }
-
-        appendMessage(replyMsg)
-
-        // Persist peer reply to MongoDB
-        fetch('/api/messages', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            conversationId: roomId,
-            sender: room.responderId,
-            content: replyText,
-          }),
-        }).catch(() => {})
-
-        if (activeRoomRef.current !== roomId) {
-          setUnread((current) => ({ ...current, [roomId]: (current[roomId] ?? 0) + 1 }))
-        }
-      }, REPLY_DELAY_MS)
     },
-    [activeRoomId, appendMessage, nextId, schedule, session.name],
+    [activeRoomId, appendMessage, currentUserName, nextId],
   )
 
   const handleTypingEvent = useCallback(() => {
     if (socketRef.current) {
       socketRef.current.emit('typing', {
         roomId: activeRoomId,
-        userId: session.name,
-        username: session.name,
+        userId: currentUserName,
+        username: currentUserName,
       })
     }
-  }, [activeRoomId, session.name])
+  }, [activeRoomId, currentUserName])
 
   const handleStopTypingEvent = useCallback(() => {
     if (socketRef.current) {
@@ -465,8 +401,13 @@ export function Workspace() {
       email: payload.email,
       role: payload.mode === 'create' ? 'Member' : 'Lead Dev',
       token: payload.token,
+      isGuest: false,
     })
     setAuthOpen(false)
+  }, [])
+
+  const handleSignOut = useCallback(() => {
+    setSession(GUEST_SESSION)
   }, [])
 
   const handleAddContext = useCallback(
@@ -474,14 +415,14 @@ export function Workspace() {
       appendMessage({
         id: nextId('ctx'),
         roomId: activeRoomId,
-        authorId: ME_ID,
+        authorId: currentUserName,
         text,
         time: formatTime(),
         kind: 'context',
       })
       setContextOpen(false)
     },
-    [activeRoomId, appendMessage, nextId],
+    [activeRoomId, appendMessage, currentUserName, nextId],
   )
 
   const room = getRoom(activeRoomId)
@@ -499,6 +440,7 @@ export function Workspace() {
         onNewChat={() => setNewChatOpen(true)}
         onOpenAuth={() => setAuthOpen(true)}
         onClose={() => setSidebarOpen(false)}
+        onSignOut={handleSignOut}
       />
 
       <main className="relative flex min-w-0 flex-1">
@@ -517,7 +459,7 @@ export function Workspace() {
           onAddContext={() => setContextOpen(true)}
           onOpenSidebar={() => setSidebarOpen(true)}
           drawerOpen={drawerOpen}
-          onOpenDrawer={() => setDrawerOpen(true)}
+          onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
           onTyping={handleTypingEvent}
           onStopTyping={handleStopTypingEvent}
         />
@@ -530,7 +472,7 @@ export function Workspace() {
           scope={scope}
           converted={converted}
           tracker={tracker}
-          currentUserName={session.name}
+          currentUserName={currentUserName}
           onTabChange={setTab}
           onConvert={handleConvert}
           onToggleTask={handleToggleTask}

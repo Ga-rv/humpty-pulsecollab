@@ -191,9 +191,6 @@ function AuthForm({ onClose, onSubmit }: Omit<AuthModalProps, 'open'>) {
         </div>
       </form>
 
-      <p className="text-[11px] leading-relaxed text-muted-foreground">
-        Connected to backend auth endpoints (/api/auth/register and /api/auth/login) with bcrypt and JWT.
-      </p>
     </div>
   )
 }
