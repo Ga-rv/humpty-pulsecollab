@@ -18,7 +18,6 @@ import type {
 import { AddContextModal } from './add-context-modal'
 import { AuthModal, type AuthPayload } from './auth-modal'
 import { ChatStream } from './chat-stream'
-import { NewChatModal } from './new-chat-modal'
 import { PulseDrawer } from './pulse-drawer'
 import { Sidebar } from './sidebar'
 
@@ -68,7 +67,6 @@ export function Workspace() {
   const [synthesisData, setSynthesisData] = useState<PulseSynthesisData | null>(null)
 
   const [authOpen, setAuthOpen] = useState(false)
-  const [newChatOpen, setNewChatOpen] = useState(false)
   const [contextOpen, setContextOpen] = useState(false)
 
   const activeRoomRef = useRef(activeRoomId)
@@ -95,6 +93,10 @@ export function Workspace() {
 
     socket.on('receive_message', (data: Record<string, unknown>) => {
       const roomId = (data.roomId || data.conversationId || activeRoomRef.current) as string
+
+      // Ignore incoming DM socket messages if DMs are disabled
+      if (roomId.startsWith('dm-')) return
+
       const incoming: Message = {
         id: (data.id || data._id || `sock-${Date.now()}`) as string,
         roomId,
@@ -136,13 +138,19 @@ export function Workspace() {
     }
   }, [])
 
-  // Join room and load DB messages + tasks whenever activeRoomId changes
+  // Join room and load DB messages + tasks whenever activeRoomId or session changes
   useEffect(() => {
+    // If somehow a DM thread was selected, immediately fallback to MAIN_ROOM_ID
+    if (activeRoomId.startsWith('dm-')) {
+      setActiveRoomId(MAIN_ROOM_ID)
+      return
+    }
+
     if (socketRef.current && socketRef.current.connected) {
       socketRef.current.emit('join_room', activeRoomId)
     }
 
-    // Fetch messages from MongoDB
+    // Fetch messages from MongoDB for the active channel
     fetch(`/api/messages?conversationId=${encodeURIComponent(activeRoomId)}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -170,7 +178,7 @@ export function Workspace() {
       })
       .catch(() => {})
 
-    // Fetch tasks from MongoDB
+    // Fetch tasks from MongoDB for the active channel
     fetch(`/api/tasks?conversationId=${encodeURIComponent(activeRoomId)}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -195,7 +203,7 @@ export function Workspace() {
         }
       })
       .catch(() => {})
-  }, [activeRoomId])
+  }, [activeRoomId, session?.email])
 
   const nextId = useCallback((prefix: string) => {
     idCounter.current += 1
@@ -210,6 +218,9 @@ export function Workspace() {
   }, [])
 
   const selectRoom = useCallback((roomId: string) => {
+    // If a DM is clicked or requested, ignore or redirect to main channel
+    if (roomId.startsWith('dm-')) return
+
     setActiveRoomId(roomId)
     setUnread((current) => {
       if (!current[roomId]) return current
@@ -383,18 +394,27 @@ export function Workspace() {
     }
   }, [])
 
-  const handlePickPeer = useCallback(
-    (userId: string) => {
-      setDmUserIds((current) => (current.includes(userId) ? current : [...current, userId]))
-      setMessages((current) => (current[`dm-${userId}`] ? current : { ...current, [`dm-${userId}`]: [] }))
-      setNewChatOpen(false)
-      selectRoom(`dm-${userId}`)
-    },
-    [selectRoom],
-  )
-
+  // 1. AUTH STATE RESET:
+  // When a user logs in, registers, or logs out, completely purge any active client-side
+  // Direct Message thread selection, reset local DM message state to an empty array,
+  // and ensure messages sent under one user or guest session never persist or leak into another session's view.
   const handleAuth = useCallback((payload: AuthPayload) => {
     const name = toTitleCase(payload.username || payload.email.split('@')[0])
+
+    // Purge DM selection & default to #first-commit-sprint
+    setActiveRoomId(MAIN_ROOM_ID)
+    activeRoomRef.current = MAIN_ROOM_ID
+
+    // Reset local message state completely so no previous session messages leak
+    setMessages({})
+    setUnread({})
+    setDmUserIds([])
+    setTracker([])
+    setSynthesisData(null)
+    setPulseActive(false)
+    setConverted({})
+    setDrawerOpen(false)
+
     setSession({
       name,
       initials: toInitials(name),
@@ -403,11 +423,34 @@ export function Workspace() {
       token: payload.token,
       isGuest: false,
     })
+
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('join_room', MAIN_ROOM_ID)
+    }
+
     setAuthOpen(false)
   }, [])
 
   const handleSignOut = useCallback(() => {
+    // Purge DM selection & default to #first-commit-sprint
+    setActiveRoomId(MAIN_ROOM_ID)
+    activeRoomRef.current = MAIN_ROOM_ID
+
+    // Reset local message state completely
+    setMessages({})
+    setUnread({})
+    setDmUserIds([])
+    setTracker([])
+    setSynthesisData(null)
+    setPulseActive(false)
+    setConverted({})
+    setDrawerOpen(false)
+
     setSession(GUEST_SESSION)
+
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('join_room', MAIN_ROOM_ID)
+    }
   }, [])
 
   const handleAddContext = useCallback(
@@ -437,7 +480,6 @@ export function Workspace() {
         dmUserIds={dmUserIds}
         session={session}
         onSelectRoom={selectRoom}
-        onNewChat={() => setNewChatOpen(true)}
         onOpenAuth={() => setAuthOpen(true)}
         onClose={() => setSidebarOpen(false)}
         onSignOut={handleSignOut}
@@ -482,12 +524,6 @@ export function Workspace() {
       </main>
 
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} onSubmit={handleAuth} />
-      <NewChatModal
-        open={newChatOpen}
-        existingUserIds={dmUserIds}
-        onClose={() => setNewChatOpen(false)}
-        onPick={handlePickPeer}
-      />
       <AddContextModal
         open={contextOpen}
         roomName={room.name}

@@ -1,8 +1,8 @@
 'use client'
 
-import { Hash, LogIn, LogOut, Plus, Zap } from 'lucide-react'
+import { Hash, LogIn, LogOut, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { CHANNELS, USERS } from '@/lib/pulse/data'
+import { CHANNELS } from '@/lib/pulse/data'
 import type { Session } from '@/lib/pulse/types'
 import { Avatar } from './avatar'
 
@@ -10,10 +10,10 @@ interface SidebarProps {
   open: boolean
   activeRoomId: string
   unread: Record<string, number>
-  dmUserIds: string[]
+  dmUserIds?: string[]
   session: Session | null
   onSelectRoom: (roomId: string) => void
-  onNewChat: () => void
+  onNewChat?: () => void
   onOpenAuth: () => void
   onClose: () => void
   onSignOut?: () => void
@@ -33,10 +33,8 @@ export function Sidebar({
   open,
   activeRoomId,
   unread,
-  dmUserIds,
   session,
   onSelectRoom,
-  onNewChat,
   onOpenAuth,
   onClose,
   onSignOut,
@@ -106,64 +104,19 @@ export function Sidebar({
           </section>
 
           <section aria-labelledby="dm-heading">
-            <div className="flex items-center justify-between px-2 pb-1.5 pt-1">
+            <div className="px-2 pb-1 pt-1">
               <h2
                 id="dm-heading"
                 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
               >
                 Direct Messages
               </h2>
-              <button
-                type="button"
-                onClick={onNewChat}
-                className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:text-foreground"
-              >
-                <Plus className="size-3" aria-hidden="true" />
-                New Chat
-              </button>
             </div>
-            {dmUserIds.length === 0 ? (
-              <p className="px-2 py-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                No direct messages yet. Start a conversation with a teammate.
-              </p>
-            ) : (
-              <ul className="flex flex-col gap-0.5">
-                {dmUserIds.map((userId) => {
-                  const user = USERS[userId] ?? {
-                    id: userId,
-                    name: userId,
-                    initials: userId.slice(0, 2).toUpperCase(),
-                    online: false,
-                  }
-                  const roomId = `dm-${userId}`
-                  const active = roomId === activeRoomId
-                  return (
-                    <li key={userId}>
-                      <button
-                        type="button"
-                        onClick={() => onSelectRoom(roomId)}
-                        aria-current={active ? 'page' : undefined}
-                        className={cn(
-                          'flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left text-[13px] transition-colors',
-                          active
-                            ? 'border-border bg-panel-2 font-medium text-foreground'
-                            : 'border-transparent text-muted-foreground hover:bg-panel-2/60 hover:text-foreground',
-                          !active && unread[roomId] ? 'text-foreground' : '',
-                        )}
-                      >
-                        <Avatar initials={user.initials} size="sm" online={user.online} showPresence />
-                        <span className="truncate">
-                          {user.name}
-                          {user.role && <span className="text-muted-foreground"> ({user.role})</span>}
-                        </span>
-                        <span className="sr-only">{user.online ? 'Online' : 'Offline'}</span>
-                        {!active && <UnreadBadge count={unread[roomId] ?? 0} />}
-                      </button>
-                    </li>
-                  )
-                })}
-              </ul>
-            )}
+            <div className="px-2 py-2">
+              <span className="inline-block rounded-md border border-border/60 bg-panel-2/50 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                Direct Messages (Available in v2 roadmap)
+              </span>
+            </div>
           </section>
         </nav>
 
