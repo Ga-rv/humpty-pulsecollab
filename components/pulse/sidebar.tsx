@@ -1,0 +1,176 @@
+'use client'
+
+import { Hash, LogOut, Plus, Zap } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { CHANNELS, USERS } from '@/lib/pulse/data'
+import type { Session } from '@/lib/pulse/types'
+import { Avatar } from './avatar'
+
+interface SidebarProps {
+  open: boolean
+  activeRoomId: string
+  unread: Record<string, number>
+  dmUserIds: string[]
+  session: Session
+  onSelectRoom: (roomId: string) => void
+  onNewChat: () => void
+  onOpenAuth: () => void
+  onClose: () => void
+}
+
+function UnreadBadge({ count }: { count: number }) {
+  if (!count) return null
+  return (
+    <span className="ml-auto inline-flex min-w-5 items-center justify-center rounded-full bg-border px-1.5 py-px font-mono text-[10px] font-semibold text-foreground">
+      <span className="sr-only">{count} unread messages</span>
+      <span aria-hidden="true">{count}</span>
+    </span>
+  )
+}
+
+export function Sidebar({
+  open,
+  activeRoomId,
+  unread,
+  dmUserIds,
+  session,
+  onSelectRoom,
+  onNewChat,
+  onOpenAuth,
+  onClose,
+}: SidebarProps) {
+  return (
+    <>
+      {open && (
+        <div
+          className="fixed inset-0 z-30 bg-black/60 md:hidden"
+          onClick={onClose}
+          aria-hidden="true"
+        />
+      )}
+      <aside
+        aria-label="Workspace navigation"
+        className={cn(
+          'fixed inset-y-0 left-0 z-40 flex w-[260px] shrink-0 flex-col border-r border-border bg-panel transition-transform duration-200 md:static md:z-auto md:translate-x-0',
+          open ? 'translate-x-0' : '-translate-x-full',
+        )}
+      >
+        <div className="flex h-12 items-center justify-between border-b border-border px-3">
+          <div className="flex items-center gap-1.5">
+            <Zap className="size-4 fill-pulse text-pulse" aria-hidden="true" />
+            <span className="text-sm font-semibold tracking-tight text-foreground">PulseCollab</span>
+          </div>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-ok/30 bg-ok/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-ok">
+            <span className="live-dot size-1.5 rounded-full bg-ok" aria-hidden="true" />
+            LIVE
+          </span>
+        </div>
+
+        <nav className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-2">
+          <section aria-labelledby="rooms-heading">
+            <h2
+              id="rooms-heading"
+              className="px-2 pb-1.5 pt-1 font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
+            >
+              Sprint Channels / War Rooms
+            </h2>
+            <ul className="flex flex-col gap-0.5">
+              {CHANNELS.map((room) => {
+                const active = room.id === activeRoomId
+                return (
+                  <li key={room.id}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectRoom(room.id)}
+                      aria-current={active ? 'page' : undefined}
+                      className={cn(
+                        'flex w-full items-center gap-1.5 rounded-lg border px-2 py-1.5 text-left text-[13px] transition-colors',
+                        active
+                          ? 'border-border bg-panel-2 font-medium text-foreground'
+                          : 'border-transparent text-muted-foreground hover:bg-panel-2/60 hover:text-foreground',
+                        !active && unread[room.id] ? 'text-foreground' : '',
+                      )}
+                    >
+                      <Hash className="size-3.5 shrink-0" aria-hidden="true" />
+                      <span className="truncate">{room.name}</span>
+                      {!active && <UnreadBadge count={unread[room.id] ?? 0} />}
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          </section>
+
+          <section aria-labelledby="dm-heading">
+            <div className="flex items-center justify-between px-2 pb-1.5 pt-1">
+              <h2
+                id="dm-heading"
+                className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
+              >
+                Direct Messages
+              </h2>
+              <button
+                type="button"
+                onClick={onNewChat}
+                className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:text-foreground"
+              >
+                <Plus className="size-3" aria-hidden="true" />
+                New Chat
+              </button>
+            </div>
+            <ul className="flex flex-col gap-0.5">
+              {dmUserIds.map((userId) => {
+                const user = USERS[userId]
+                if (!user) return null
+                const roomId = `dm-${userId}`
+                const active = roomId === activeRoomId
+                return (
+                  <li key={userId}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectRoom(roomId)}
+                      aria-current={active ? 'page' : undefined}
+                      className={cn(
+                        'flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left text-[13px] transition-colors',
+                        active
+                          ? 'border-border bg-panel-2 font-medium text-foreground'
+                          : 'border-transparent text-muted-foreground hover:bg-panel-2/60 hover:text-foreground',
+                        !active && unread[roomId] ? 'text-foreground' : '',
+                      )}
+                    >
+                      <Avatar initials={user.initials} size="sm" online={user.online} showPresence />
+                      <span className="truncate">
+                        {user.name}
+                        {user.role && <span className="text-muted-foreground"> ({user.role})</span>}
+                      </span>
+                      <span className="sr-only">{user.online ? 'Online' : 'Offline'}</span>
+                      {!active && <UnreadBadge count={unread[roomId] ?? 0} />}
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          </section>
+        </nav>
+
+        <div className="flex items-center gap-2 border-t border-border p-2.5">
+          <Avatar initials={session.initials} showPresence online />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[13px] font-medium text-foreground">{session.name}</p>
+            <span className="mt-0.5 inline-flex rounded-full border border-border bg-panel-2 px-1.5 py-px font-mono text-[10px] text-muted-foreground">
+              {session.role}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenAuth}
+            aria-label="Sign out or switch account"
+            className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:text-foreground"
+          >
+            <LogOut className="size-4" aria-hidden="true" />
+          </button>
+        </div>
+      </aside>
+    </>
+  )
+}
