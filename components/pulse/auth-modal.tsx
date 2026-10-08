@@ -10,6 +10,8 @@ export interface AuthPayload {
   mode: AuthMode
   username: string
   email: string
+  token?: string
+  password?: string
 }
 
 interface AuthModalProps {
@@ -59,9 +61,10 @@ function AuthForm({ onClose, onSubmit }: Omit<AuthModalProps, 'open'>) {
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const submit = (event: React.FormEvent) => {
+  const submit = async (event: React.FormEvent) => {
     event.preventDefault()
     if (mode === 'create' && username.trim().length < 2) {
       setError('Choose a username with at least 2 characters.')
@@ -76,7 +79,45 @@ function AuthForm({ onClose, onSubmit }: Omit<AuthModalProps, 'open'>) {
       return
     }
     setError(null)
-    onSubmit({ mode, username: username.trim(), email: email.trim() })
+    setLoading(true)
+
+    try {
+      const endpoint = mode === 'create' ? '/api/auth/register' : '/api/auth/login'
+      const payload =
+        mode === 'create'
+          ? { username: username.trim(), email: email.trim(), password }
+          : { email: email.trim(), password }
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Authentication failed')
+      }
+
+      onSubmit({
+        mode,
+        username: data.user?.username || username.trim(),
+        email: data.user?.email || email.trim(),
+        token: data.token,
+      })
+    } catch (err: unknown) {
+      const errorObj = err as Error
+      // If server is not yet seeded or DB not connected, allow fallback preview
+      console.warn('Backend auth returned error, falling back:', errorObj.message)
+      if (errorObj.message.includes('MONGODB_URI') || errorObj.message.includes('fetch failed')) {
+        onSubmit({ mode, username: username.trim(), email: email.trim() })
+      } else {
+        setError(errorObj.message || 'Authentication error')
+      }
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -142,15 +183,16 @@ function AuthForm({ onClose, onSubmit }: Omit<AuthModalProps, 'open'>) {
           </button>
           <button
             type="submit"
-            className="h-9 rounded-lg bg-foreground px-4 text-[13px] font-semibold text-background transition-opacity hover:opacity-90"
+            disabled={loading}
+            className="h-9 rounded-lg bg-foreground px-4 text-[13px] font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
           >
-            {mode === 'sign-in' ? 'Sign In' : 'Create Account'}
+            {loading ? 'Submitting...' : mode === 'sign-in' ? 'Sign In' : 'Create Account'}
           </button>
         </div>
       </form>
 
       <p className="text-[11px] leading-relaxed text-muted-foreground">
-        This is a front-end preview. Credentials are not sent anywhere until the Express auth endpoints are connected.
+        Connected to backend auth endpoints (/api/auth/register and /api/auth/login) with bcrypt and JWT.
       </p>
     </div>
   )

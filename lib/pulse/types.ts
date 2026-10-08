@@ -13,6 +13,7 @@ export interface Session {
   initials: string
   email: string
   role: string
+  token?: string
 }
 
 export interface Room {
@@ -41,6 +42,28 @@ export interface TrackerTask {
   owner: string
   done: boolean
   fromPulse?: boolean
+  deadline?: string
+}
+
+export interface ActionItem {
+  task: string
+  assignee: string
+  deadline: string
+}
+
+export interface DeadlineItem {
+  title: string
+  due: string
+  source: string
+  urgency: 'URGENT' | 'SOON'
+  calendarUrl: string
+}
+
+export interface PulseSynthesisData {
+  decisions: string[]
+  actionItems: ActionItem[]
+  deadlines: DeadlineItem[]
+  unresolved: string[]
 }
 
 export type PulseTab = 'deadlines' | 'actions' | 'tracker'

@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { CalendarDays, ClipboardList, Flame, X, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { SCOPE_LABEL } from '@/lib/pulse/types'
-import type { PulseTab, ScanScope, TrackerTask } from '@/lib/pulse/types'
+import type { PulseSynthesisData, PulseTab, ScanScope, TrackerTask } from '@/lib/pulse/types'
 import { ActionsTab } from './actions-tab'
 import { DeadlinesTab } from './deadlines-tab'
 import { TrackerTab } from './tracker-tab'
@@ -19,9 +19,10 @@ interface PulseDrawerProps {
   tracker: TrackerTask[]
   currentUserName: string
   onTabChange: (tab: PulseTab) => void
-  onConvert: (key: string, title: string, owner: string) => void
+  onConvert: (key: string, title: string, owner: string, deadline?: string) => void
   onToggleTask: (id: string) => void
   onClose: () => void
+  synthesisData?: PulseSynthesisData | null
 }
 
 const TABS: { id: PulseTab; label: string; icon: typeof CalendarDays }[] = [
@@ -46,7 +47,7 @@ function useSyncedLabel(syncedAt: number | null) {
 function ScanningSkeleton() {
   return (
     <div className="flex flex-col gap-2.5" role="status" aria-live="polite">
-      <p className="font-mono text-[11px] text-pulse">Synthesizing deadlines, actions and open questions...</p>
+      <p className="font-mono text-[11px] text-pulse">Synthesizing deadlines, actions and open questions via Gemini 1.5 Flash...</p>
       {[0, 1, 2].map((item) => (
         <div key={item} className="flex animate-pulse flex-col gap-2 rounded-lg border border-border bg-panel-2 p-3">
           <div className="h-3 w-3/4 rounded bg-border" />
@@ -71,6 +72,7 @@ export function PulseDrawer({
   onConvert,
   onToggleTask,
   onClose,
+  synthesisData,
 }: PulseDrawerProps) {
   const syncedLabel = useSyncedLabel(syncedAt)
 
@@ -146,9 +148,20 @@ export function PulseDrawer({
           {scanning ? (
             <ScanningSkeleton />
           ) : tab === 'deadlines' ? (
-            <DeadlinesTab converted={converted} onConvert={onConvert} />
+            <DeadlinesTab
+              converted={converted}
+              onConvert={onConvert}
+              deadlines={synthesisData?.deadlines}
+            />
           ) : tab === 'actions' ? (
-            <ActionsTab converted={converted} currentUserName={currentUserName} onConvert={onConvert} />
+            <ActionsTab
+              converted={converted}
+              currentUserName={currentUserName}
+              onConvert={onConvert}
+              actionItems={synthesisData?.actionItems}
+              unresolved={synthesisData?.unresolved}
+              decisions={synthesisData?.decisions}
+            />
           ) : (
             <TrackerTab tasks={tracker} onToggle={onToggleTask} />
           )}

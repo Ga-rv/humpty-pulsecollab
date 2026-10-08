@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { io, Socket } from 'socket.io-client'
 import {
   INITIAL_DM_USER_IDS,
   MAIN_ROOM_ID,
@@ -13,7 +14,14 @@ import {
   formatTime,
   getRoom,
 } from '@/lib/pulse/data'
-import type { Message, PulseTab, ScanScope, Session, TrackerTask } from '@/lib/pulse/types'
+import type {
+  Message,
+  PulseSynthesisData,
+  PulseTab,
+  ScanScope,
+  Session,
+  TrackerTask,
+} from '@/lib/pulse/types'
 import { AddContextModal } from './add-context-modal'
 import { AuthModal, type AuthPayload } from './auth-modal'
 import { ChatStream } from './chat-stream'
@@ -28,7 +36,6 @@ const DEFAULT_SESSION: Session = {
   role: 'Lead Dev',
 }
 
-const SCAN_DURATION_MS = 1200
 const TYPING_DELAY_MS = 600
 const REPLY_DELAY_MS = 2200
 
@@ -67,6 +74,7 @@ export function Workspace() {
   const [syncedAt, setSyncedAt] = useState<number | null>(null)
   const [converted, setConverted] = useState<Record<string, boolean>>({})
   const [tracker, setTracker] = useState<TrackerTask[]>(SEED_TRACKER)
+  const [synthesisData, setSynthesisData] = useState<PulseSynthesisData | null>(null)
 
   const [authOpen, setAuthOpen] = useState(false)
   const [newChatOpen, setNewChatOpen] = useState(false)
@@ -75,16 +83,144 @@ export function Workspace() {
   const activeRoomRef = useRef(activeRoomId)
   const timers = useRef<ReturnType<typeof setTimeout>[]>([])
   const idCounter = useRef(0)
+  const socketRef = useRef<Socket | null>(null)
 
   useEffect(() => {
     activeRoomRef.current = activeRoomId
   }, [activeRoomId])
 
+  // Initialize Socket.IO connection
   useEffect(() => {
     if (window.innerWidth < 1280) setDrawerOpen(false)
+
+    const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || window.location.origin
+    const socket = io(socketUrl, {
+      transports: ['websocket', 'polling'],
+      autoConnect: true,
+    })
+    socketRef.current = socket
+
+    socket.on('connect', () => {
+      socket.emit('join_room', activeRoomRef.current)
+    })
+
+    socket.on('receive_message', (data: Record<string, unknown>) => {
+      const roomId = (data.roomId || data.conversationId || activeRoomRef.current) as string
+      const incoming: Message = {
+        id: (data.id || data._id || `sock-${Date.now()}`) as string,
+        roomId,
+        authorId: (data.authorId || data.sender || 'peer') as string,
+        text: (data.text || data.content || '') as string,
+        time: (data.time || formatTime()) as string,
+        pulseKind: data.pulseKind as Message['pulseKind'],
+      }
+
+      setMessages((current) => {
+        const roomMsgs = current[roomId] ?? []
+        // Deduplicate
+        if (roomMsgs.some((m) => m.id === incoming.id || (m.text === incoming.text && m.time === incoming.time && m.authorId === incoming.authorId))) {
+          return current
+        }
+        return {
+          ...current,
+          [roomId]: [...roomMsgs, incoming],
+        }
+      })
+
+      if (activeRoomRef.current !== roomId) {
+        setUnread((current) => ({ ...current, [roomId]: (current[roomId] ?? 0) + 1 }))
+      }
+    })
+
+    socket.on('typing', (data: { roomId: string; userId?: string; username?: string }) => {
+      setTyping({ roomId: data.roomId, userId: data.userId || data.username || 'peer' })
+    })
+
+    socket.on('stop_typing', (data: { roomId: string }) => {
+      setTyping((prev) => (prev?.roomId === data.roomId ? null : prev))
+    })
+
     const pending = timers.current
-    return () => pending.forEach(clearTimeout)
+    return () => {
+      pending.forEach(clearTimeout)
+      socket.disconnect()
+    }
   }, [])
+
+  // Join room and load DB messages + tasks whenever activeRoomId changes
+  useEffect(() => {
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('join_room', activeRoomId)
+    }
+
+    // Fetch messages from MongoDB
+    fetch(`/api/messages?conversationId=${encodeURIComponent(activeRoomId)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.messages && Array.isArray(data.messages) && data.messages.length > 0) {
+          interface DbMsg {
+            _id?: string
+            id?: string
+            conversationId: string
+            sender: string
+            content: string
+            createdAt: string
+          }
+          const dbMsgs: Message[] = data.messages.map((m: DbMsg) => ({
+            id: m._id || m.id || `db-${Date.now()}`,
+            roomId: m.conversationId,
+            authorId: m.sender,
+            text: m.content,
+            time: formatTime(new Date(m.createdAt)),
+          }))
+          setMessages((curr) => {
+            const currentRoomMsgs = curr[activeRoomId] ?? []
+            const merged = [...currentRoomMsgs]
+            for (const dm of dbMsgs) {
+              if (!merged.some((m) => m.id === dm.id || (m.text === dm.text && m.authorId === dm.authorId))) {
+                merged.push(dm)
+              }
+            }
+            return { ...curr, [activeRoomId]: merged }
+          })
+        }
+      })
+      .catch(() => {})
+
+    // Fetch tasks from MongoDB
+    fetch(`/api/tasks?conversationId=${encodeURIComponent(activeRoomId)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.tasks && Array.isArray(data.tasks)) {
+          interface DbTask {
+            _id?: string
+            id?: string
+            title: string
+            assignee: string
+            status: string
+            deadline?: string
+          }
+          const dbTasks: TrackerTask[] = data.tasks.map((t: DbTask) => ({
+            id: t._id || t.id || `task-${Date.now()}`,
+            title: t.title,
+            owner: t.assignee || 'Team',
+            done: t.status === 'completed',
+            deadline: t.deadline,
+            fromPulse: true,
+          }))
+          setTracker((curr) => {
+            const merged = [...dbTasks]
+            for (const ct of curr) {
+              if (!merged.some((t) => t.id === ct.id || t.title === ct.title)) {
+                merged.push(ct)
+              }
+            }
+            return merged
+          })
+        }
+      })
+      .catch(() => {})
+  }, [activeRoomId])
 
   const schedule = useCallback((callback: () => void, delay: number) => {
     timers.current.push(setTimeout(callback, delay))
@@ -116,54 +252,199 @@ export function Workspace() {
     (text: string) => {
       const room = getRoom(activeRoomId)
       const roomId = room.id
-      appendMessage({ id: nextId('msg'), roomId, authorId: ME_ID, text, time: formatTime() })
+      const msgId = nextId('msg')
+      const time = formatTime()
 
+      const outgoingMessage: Message = {
+        id: msgId,
+        roomId,
+        authorId: ME_ID,
+        text,
+        time,
+      }
+
+      appendMessage(outgoingMessage)
+
+      // Emit to Socket.IO room
+      if (socketRef.current) {
+        socketRef.current.emit('send_message', {
+          id: msgId,
+          roomId,
+          conversationId: roomId,
+          authorId: ME_ID,
+          sender: session.name,
+          content: text,
+          text,
+          time,
+        })
+      }
+
+      // Persist to MongoDB
+      fetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversationId: roomId,
+          sender: session.name,
+          content: text,
+        }),
+      }).catch((err) => console.warn('Failed to persist message to DB:', err))
+
+      // Keep mock peer responses if in demo channels
       const replies = REPLIES[room.responderId]
       if (!replies) return
 
       schedule(() => setTyping({ roomId, userId: room.responderId }), TYPING_DELAY_MS)
       schedule(() => {
         setTyping(null)
-        appendMessage({
-          id: nextId('reply'),
+        const replyText = replies[Math.floor(Math.random() * replies.length)]
+        const replyId = nextId('reply')
+        const replyTime = formatTime()
+
+        const replyMsg: Message = {
+          id: replyId,
           roomId,
           authorId: room.responderId,
-          text: replies[Math.floor(Math.random() * replies.length)],
-          time: formatTime(),
-        })
+          text: replyText,
+          time: replyTime,
+        }
+
+        appendMessage(replyMsg)
+
+        // Persist peer reply to MongoDB
+        fetch('/api/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationId: roomId,
+            sender: room.responderId,
+            content: replyText,
+          }),
+        }).catch(() => {})
+
         if (activeRoomRef.current !== roomId) {
           setUnread((current) => ({ ...current, [roomId]: (current[roomId] ?? 0) + 1 }))
         }
       }, REPLY_DELAY_MS)
     },
-    [activeRoomId, appendMessage, nextId, schedule],
+    [activeRoomId, appendMessage, nextId, schedule, session.name],
   )
 
-  const handleSynthesize = useCallback(() => {
+  const handleTypingEvent = useCallback(() => {
+    if (socketRef.current) {
+      socketRef.current.emit('typing', {
+        roomId: activeRoomId,
+        userId: session.name,
+        username: session.name,
+      })
+    }
+  }, [activeRoomId, session.name])
+
+  const handleStopTypingEvent = useCallback(() => {
+    if (socketRef.current) {
+      socketRef.current.emit('stop_typing', {
+        roomId: activeRoomId,
+      })
+    }
+  }, [activeRoomId])
+
+  const handleSynthesize = useCallback(async () => {
     setDrawerOpen(true)
     setTab('deadlines')
     setScanning(true)
     setScanKey((key) => key + 1)
-    schedule(() => {
-      setScanning(false)
+
+    const scopeParam = scope === 'last-50' ? 'last50' : 'today'
+
+    try {
+      const res = await fetch('/api/pulse/synthesize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversationId: activeRoomId,
+          scope: scopeParam,
+        }),
+      })
+
+      const data = await res.json()
+
+      if (res.ok && data) {
+        setSynthesisData(data)
+        setPulseActive(true)
+        setSyncedAt(Date.now())
+      } else {
+        console.warn('Synthesis returned non-ok result:', data)
+        setPulseActive(true)
+        setSyncedAt(Date.now())
+      }
+    } catch (err) {
+      console.error('Failed to synthesize pulse:', err)
       setPulseActive(true)
       setSyncedAt(Date.now())
-    }, SCAN_DURATION_MS)
-  }, [schedule])
+    } finally {
+      setScanning(false)
+    }
+  }, [activeRoomId, scope])
 
   const handleConvert = useCallback(
-    (key: string, title: string, owner: string) => {
+    async (key: string, title: string, owner: string, deadline?: string) => {
       setConverted((current) => ({ ...current, [key]: true }))
-      setTracker((current) => [
-        { id: nextId('task'), title, owner, done: false, fromPulse: true },
-        ...current,
-      ])
+      const tempId = nextId('task')
+      const newTask: TrackerTask = {
+        id: tempId,
+        title,
+        owner,
+        done: false,
+        fromPulse: true,
+        deadline,
+      }
+
+      setTracker((current) => [newTask, ...current])
+
+      try {
+        const res = await fetch('/api/tasks', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            conversationId: activeRoomId,
+            title,
+            assignee: owner,
+            deadline: deadline || '',
+            status: 'pending',
+          }),
+        })
+
+        const data = await res.json()
+        if (res.ok && data?.task) {
+          setTracker((current) =>
+            current.map((task) =>
+              task.id === tempId ? { ...task, id: data.task._id || data.task.id } : task
+            )
+          )
+        }
+      } catch (err) {
+        console.warn('Failed to persist task document to MongoDB:', err)
+      }
     },
-    [nextId],
+    [activeRoomId, nextId],
   )
 
-  const handleToggleTask = useCallback((id: string) => {
-    setTracker((current) => current.map((task) => (task.id === id ? { ...task, done: !task.done } : task)))
+  const handleToggleTask = useCallback(async (id: string) => {
+    setTracker((current) =>
+      current.map((task) => (task.id === id ? { ...task, done: !task.done } : task))
+    )
+
+    // Call PATCH /api/tasks/[id] if valid ID
+    if (/^[0-9a-fA-F]{24}$/.test(id)) {
+      try {
+        await fetch(`/api/tasks/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        console.warn('Failed to toggle task in MongoDB:', err)
+      }
+    }
   }, [])
 
   const handlePickPeer = useCallback(
@@ -183,6 +464,7 @@ export function Workspace() {
       initials: toInitials(name),
       email: payload.email,
       role: payload.mode === 'create' ? 'Member' : 'Lead Dev',
+      token: payload.token,
     })
     setAuthOpen(false)
   }, [])
@@ -236,6 +518,8 @@ export function Workspace() {
           onOpenSidebar={() => setSidebarOpen(true)}
           drawerOpen={drawerOpen}
           onOpenDrawer={() => setDrawerOpen(true)}
+          onTyping={handleTypingEvent}
+          onStopTyping={handleStopTypingEvent}
         />
 
         <PulseDrawer
@@ -251,6 +535,7 @@ export function Workspace() {
           onConvert={handleConvert}
           onToggleTask={handleToggleTask}
           onClose={() => setDrawerOpen(false)}
+          synthesisData={synthesisData}
         />
       </main>
 

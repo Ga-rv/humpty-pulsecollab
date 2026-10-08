@@ -1,3 +1,5 @@
+'use client'
+
 import { Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { TrackerTask } from '@/lib/pulse/types'
@@ -60,6 +62,7 @@ export function TrackerTab({ tasks, onToggle }: TrackerTabProps) {
                 </span>
                 <span className="flex flex-wrap items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
                   {task.done ? 'Completed' : `${task.owner} - Pending`}
+                  {task.deadline && <span>• Due: {task.deadline}</span>}
                   {task.fromPulse && (
                     <span className="rounded-full border border-pulse/30 bg-pulse-soft px-1.5 py-px text-[9px] font-semibold tracking-wide text-pulse">
                       FROM PULSE

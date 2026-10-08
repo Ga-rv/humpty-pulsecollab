@@ -24,6 +24,8 @@ interface ChatStreamProps {
   onOpenSidebar: () => void
   drawerOpen: boolean
   onOpenDrawer: () => void
+  onTyping?: () => void
+  onStopTyping?: () => void
 }
 
 export function ChatStream({
@@ -42,24 +44,40 @@ export function ChatStream({
   onOpenSidebar,
   drawerOpen,
   onOpenDrawer,
+  onTyping,
+  onStopTyping,
 }: ChatStreamProps) {
   const [draft, setDraft] = useState('')
   const feedRef = useRef<HTMLDivElement>(null)
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     const feed = feedRef.current
     if (feed) feed.scrollTop = feed.scrollHeight
   }, [messages.length, room.id, typingUserId])
 
+  const handleInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setDraft(event.target.value)
+    if (onTyping) {
+      onTyping()
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
+      typingTimeoutRef.current = setTimeout(() => {
+        onStopTyping?.()
+      }, 1500)
+    }
+  }
+
   const submit = (event: React.FormEvent) => {
     event.preventDefault()
     const text = draft.trim()
     if (!text) return
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
+    onStopTyping?.()
     onSend(text)
     setDraft('')
   }
 
-  const typingUser = typingUserId ? USERS[typingUserId] : null
+  const typingUser = typingUserId ? (USERS[typingUserId] || { name: typingUserId }) : null
   const isChannel = room.type === 'channel'
   const dmUser = room.userId ? USERS[room.userId] : null
 
@@ -135,8 +153,13 @@ export function ChatStream({
               className="flex flex-col gap-2"
             >
               {messages.map((message) => {
-                const outgoing = message.authorId === ME_ID
-                const author = USERS[message.authorId] ?? USERS.aman
+                const outgoing = message.authorId === ME_ID || message.authorId === session.name
+                const author = USERS[message.authorId] ?? {
+                  id: message.authorId,
+                  name: message.authorId,
+                  initials: message.authorId.slice(0, 2).toUpperCase(),
+                  online: true,
+                }
                 return (
                   <MessageItem
                     key={message.id}
@@ -174,7 +197,8 @@ export function ChatStream({
             <input
               id="compose-input"
               value={draft}
-              onChange={(event) => setDraft(event.target.value)}
+              onChange={handleInputChange}
+              onBlur={() => onStopTyping?.()}
               placeholder="Type a message or paste a deadline..."
               autoComplete="off"
               className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-pulse"
