@@ -18,8 +18,9 @@ import type {
 import { AddContextModal } from './add-context-modal'
 import { AuthModal, type AuthPayload } from './auth-modal'
 import { ChatStream } from './chat-stream'
+import { NewChatModal } from './new-chat-modal'
 import { PulseDrawer } from './pulse-drawer'
-import { Sidebar } from './sidebar'
+import { Sidebar, type ChatUser } from './sidebar'
 
 const GUEST_SESSION: Session = {
   name: 'Guest User',
@@ -51,7 +52,7 @@ export function Workspace() {
   const [activeRoomId, setActiveRoomId] = useState(MAIN_ROOM_ID)
   const [messages, setMessages] = useState<Record<string, Message[]>>({})
   const [unread, setUnread] = useState<Record<string, number>>({})
-  const [dmUserIds, setDmUserIds] = useState<string[]>([])
+  const [registeredUsers, setRegisteredUsers] = useState<ChatUser[]>([])
   const [typing, setTyping] = useState<{ roomId: string; userId: string } | null>(null)
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -67,6 +68,7 @@ export function Workspace() {
   const [synthesisData, setSynthesisData] = useState<PulseSynthesisData | null>(null)
 
   const [authOpen, setAuthOpen] = useState(false)
+  const [newChatOpen, setNewChatOpen] = useState(false)
   const [contextOpen, setContextOpen] = useState(false)
 
   const activeRoomRef = useRef(activeRoomId)
@@ -77,6 +79,26 @@ export function Workspace() {
   useEffect(() => {
     activeRoomRef.current = activeRoomId
   }, [activeRoomId])
+
+  // Fetch registered users for 1-to-1 DMs
+  const fetchRegisteredUsers = useCallback(() => {
+    const headers: Record<string, string> = {}
+    if (session?.token) {
+      headers['Authorization'] = `Bearer ${session.token}`
+    }
+    fetch('/api/users', { headers })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.users && Array.isArray(data.users)) {
+          setRegisteredUsers(data.users)
+        }
+      })
+      .catch((err) => console.warn('Failed to fetch registered users:', err))
+  }, [session?.token])
+
+  useEffect(() => {
+    fetchRegisteredUsers()
+  }, [fetchRegisteredUsers])
 
   // Initialize Socket.IO connection
   useEffect(() => {
@@ -93,9 +115,6 @@ export function Workspace() {
 
     socket.on('receive_message', (data: Record<string, unknown>) => {
       const roomId = (data.roomId || data.conversationId || activeRoomRef.current) as string
-
-      // Ignore incoming DM socket messages if DMs are disabled
-      if (roomId.startsWith('dm-')) return
 
       const incoming: Message = {
         id: (data.id || data._id || `sock-${Date.now()}`) as string,
@@ -138,19 +157,76 @@ export function Workspace() {
     }
   }, [])
 
-  // Join room and load DB messages + tasks whenever activeRoomId or session changes
+  // 1-on-1 DIRECT MESSAGE POLLING SYNC (every 2000ms when inside an active DM thread)
   useEffect(() => {
-    // If somehow a DM thread was selected, immediately fallback to MAIN_ROOM_ID
-    if (activeRoomId.startsWith('dm-')) {
-      setActiveRoomId(MAIN_ROOM_ID)
-      return
+    if (!activeRoomId.startsWith('dm-')) return
+    if (!session?.token) return
+
+    const targetUserId = activeRoomId.replace(/^dm-/, '')
+
+    const pollDirectMessages = async () => {
+      try {
+        const res = await fetch(`/api/messages/direct?recipientId=${encodeURIComponent(targetUserId)}`, {
+          headers: {
+            Authorization: `Bearer ${session.token}`,
+          },
+        })
+        if (!res.ok) return
+        const data = await res.json()
+        if (data?.messages && Array.isArray(data.messages)) {
+          interface DmItem {
+            _id?: string
+            id?: string
+            senderId: string
+            recipientId: string
+            text: string
+            createdAt: string
+          }
+          const incomingMsgs: Message[] = data.messages.map((m: DmItem) => ({
+            id: m._id || m.id || `dm-${Date.now()}`,
+            roomId: activeRoomId,
+            authorId: m.senderId,
+            text: m.text,
+            time: formatTime(new Date(m.createdAt)),
+          }))
+
+          setMessages((curr) => {
+            const currentList = curr[activeRoomId] || []
+            // Compare lengths and IDs to prevent re-render flicker and preserve scroll position
+            if (
+              currentList.length === incomingMsgs.length &&
+              currentList.every((msg, idx) => msg.id === incomingMsgs[idx]?.id)
+            ) {
+              return curr
+            }
+            return {
+              ...curr,
+              [activeRoomId]: incomingMsgs,
+            }
+          })
+        }
+      } catch (err) {
+        console.warn('Direct message poll error:', err)
+      }
     }
+
+    // Initial fetch
+    pollDirectMessages()
+
+    // 2000ms polling interval
+    const intervalId = setInterval(pollDirectMessages, 2000)
+    return () => clearInterval(intervalId)
+  }, [activeRoomId, session?.token])
+
+  // Channel messages & tasks fetcher
+  useEffect(() => {
+    if (activeRoomId.startsWith('dm-')) return
 
     if (socketRef.current && socketRef.current.connected) {
       socketRef.current.emit('join_room', activeRoomId)
     }
 
-    // Fetch messages from MongoDB for the active channel
+    // Fetch messages from MongoDB for active channel
     fetch(`/api/messages?conversationId=${encodeURIComponent(activeRoomId)}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -178,7 +254,7 @@ export function Workspace() {
       })
       .catch(() => {})
 
-    // Fetch tasks from MongoDB for the active channel
+    // Fetch tasks from MongoDB for active channel
     fetch(`/api/tasks?conversationId=${encodeURIComponent(activeRoomId)}`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -218,9 +294,6 @@ export function Workspace() {
   }, [])
 
   const selectRoom = useCallback((roomId: string) => {
-    // If a DM is clicked or requested, ignore or redirect to main channel
-    if (roomId.startsWith('dm-')) return
-
     setActiveRoomId(roomId)
     setUnread((current) => {
       if (!current[roomId]) return current
@@ -234,10 +307,71 @@ export function Workspace() {
 
   const handleSend = useCallback(
     (text: string) => {
-      const room = getRoom(activeRoomId)
-      const roomId = room.id
       const msgId = nextId('msg')
       const time = formatTime()
+
+      // Handle 1-on-1 Direct Message persistence and sync
+      if (activeRoomId.startsWith('dm-')) {
+        if (!session?.token) {
+          setAuthOpen(true)
+          return
+        }
+
+        const targetUserId = activeRoomId.replace(/^dm-/, '')
+        const outgoingMessage: Message = {
+          id: msgId,
+          roomId: activeRoomId,
+          authorId: session.userId || currentUserName,
+          text,
+          time,
+        }
+
+        appendMessage(outgoingMessage)
+
+        // Post to /api/messages/direct
+        fetch('/api/messages/direct', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session.token}`,
+          },
+          body: JSON.stringify({
+            recipientId: targetUserId,
+            text,
+          }),
+        })
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data) => {
+            if (data?.message?._id) {
+              setMessages((curr) => ({
+                ...curr,
+                [activeRoomId]: (curr[activeRoomId] || []).map((m) =>
+                  m.id === msgId ? { ...m, id: data.message._id } : m
+                ),
+              }))
+            }
+          })
+          .catch((err) => console.warn('Failed to persist direct message:', err))
+
+        // Emit to Socket.IO for instant peer delivery
+        if (socketRef.current) {
+          socketRef.current.emit('send_message', {
+            id: msgId,
+            roomId: activeRoomId,
+            conversationId: activeRoomId,
+            authorId: session.userId || currentUserName,
+            sender: currentUserName,
+            content: text,
+            text,
+            time,
+          })
+        }
+        return
+      }
+
+      // Handle Sprint Channel message persistence and sync
+      const room = getRoom(activeRoomId)
+      const roomId = room.id
 
       const outgoingMessage: Message = {
         id: msgId,
@@ -274,7 +408,7 @@ export function Workspace() {
         }),
       }).catch((err) => console.warn('Failed to persist message to DB:', err))
     },
-    [activeRoomId, appendMessage, currentUserName, nextId],
+    [activeRoomId, appendMessage, currentUserName, nextId, session?.token, session?.userId],
   )
 
   const handleTypingEvent = useCallback(() => {
@@ -394,10 +528,7 @@ export function Workspace() {
     }
   }, [])
 
-  // 1. AUTH STATE RESET:
-  // When a user logs in, registers, or logs out, completely purge any active client-side
-  // Direct Message thread selection, reset local DM message state to an empty array,
-  // and ensure messages sent under one user or guest session never persist or leak into another session's view.
+  // 1. AUTH STATE RESET & CLEAN SESSION HANDLING
   const handleAuth = useCallback((payload: AuthPayload) => {
     const name = toTitleCase(payload.username || payload.email.split('@')[0])
 
@@ -408,7 +539,6 @@ export function Workspace() {
     // Reset local message state completely so no previous session messages leak
     setMessages({})
     setUnread({})
-    setDmUserIds([])
     setTracker([])
     setSynthesisData(null)
     setPulseActive(false)
@@ -416,6 +546,8 @@ export function Workspace() {
     setDrawerOpen(false)
 
     setSession({
+      id: payload.userId,
+      userId: payload.userId,
       name,
       initials: toInitials(name),
       email: payload.email,
@@ -439,7 +571,6 @@ export function Workspace() {
     // Reset local message state completely
     setMessages({})
     setUnread({})
-    setDmUserIds([])
     setTracker([])
     setSynthesisData(null)
     setPulseActive(false)
@@ -452,6 +583,14 @@ export function Workspace() {
       socketRef.current.emit('join_room', MAIN_ROOM_ID)
     }
   }, [])
+
+  const handlePickPeer = useCallback(
+    (userId: string) => {
+      setNewChatOpen(false)
+      selectRoom(`dm-${userId}`)
+    },
+    [selectRoom],
+  )
 
   const handleAddContext = useCallback(
     (text: string) => {
@@ -468,7 +607,27 @@ export function Workspace() {
     [activeRoomId, appendMessage, currentUserName, nextId],
   )
 
-  const room = getRoom(activeRoomId)
+  // Determine active room metadata (channel vs dynamic 1-on-1 DM)
+  let room: ReturnType<typeof getRoom>
+  if (activeRoomId.startsWith('dm-')) {
+    const targetUserId = activeRoomId.replace(/^dm-/, '')
+    const matchedUser = registeredUsers.find(
+      (u) => u.id === targetUserId || u._id === targetUserId
+    )
+    const partnerName = matchedUser?.name || matchedUser?.username || 'Teammate'
+    room = {
+      id: activeRoomId,
+      name: partnerName,
+      type: 'dm',
+      userId: targetUserId,
+      context: `Direct message with ${partnerName}`,
+      onlineCount: 1,
+      responderId: targetUserId,
+    }
+  } else {
+    room = getRoom(activeRoomId)
+  }
+
   const typingUserId = typing && typing.roomId === activeRoomId ? typing.userId : null
 
   return (
@@ -477,9 +636,16 @@ export function Workspace() {
         open={sidebarOpen}
         activeRoomId={activeRoomId}
         unread={unread}
-        dmUserIds={dmUserIds}
+        registeredUsers={registeredUsers}
         session={session}
         onSelectRoom={selectRoom}
+        onNewChat={() => {
+          if (!session?.token) {
+            setAuthOpen(true)
+          } else {
+            setNewChatOpen(true)
+          }
+        }}
         onOpenAuth={() => setAuthOpen(true)}
         onClose={() => setSidebarOpen(false)}
         onSignOut={handleSignOut}
@@ -524,6 +690,13 @@ export function Workspace() {
       </main>
 
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} onSubmit={handleAuth} />
+      <NewChatModal
+        open={newChatOpen}
+        users={registeredUsers}
+        existingUserIds={registeredUsers.map((u) => u.id)}
+        onClose={() => setNewChatOpen(false)}
+        onPick={handlePickPeer}
+      />
       <AddContextModal
         open={contextOpen}
         roomName={room.name}

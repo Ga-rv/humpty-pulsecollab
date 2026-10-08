@@ -11,6 +11,7 @@ export interface AuthPayload {
   username: string
   email: string
   token?: string
+  userId?: string
   password?: string
 }
 
@@ -105,6 +106,7 @@ function AuthForm({ onClose, onSubmit }: Omit<AuthModalProps, 'open'>) {
         username: data.user?.username || username.trim(),
         email: data.user?.email || email.trim(),
         token: data.token,
+        userId: data.user?.id || data.user?._id,
       })
     } catch (err: unknown) {
       const errorObj = err as Error

@@ -97,11 +97,11 @@ export function ChatStream({
             <Menu className="size-4" aria-hidden="true" />
           </button>
 
-          <h1 className="flex min-w-0 items-center gap-1 text-sm font-semibold text-foreground">
+          <h1 className="flex min-w-0 items-center gap-1.5 text-sm font-semibold text-foreground">
             {isChannel ? (
               <Hash className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
             ) : (
-              <MessageSquare className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <MessageSquare className="size-4 shrink-0 text-pulse" aria-hidden="true" />
             )}
             <span className="truncate">{room.name}</span>
           </h1>
@@ -112,15 +112,15 @@ export function ChatStream({
         </div>
 
         <div className="flex items-center gap-3 shrink-0 ml-auto">
-          <span className="hidden items-center gap-1.5 whitespace-nowrap font-mono text-[11px] text-muted-foreground sm:inline-flex">
+          <span className="flex items-center gap-1.5 whitespace-nowrap font-mono text-[11px] text-muted-foreground">
             <span
               className={cn(
-                'size-1.5 rounded-full',
-                (isChannel || dmUser?.online) ? 'bg-ok' : 'bg-muted-foreground/60',
+                'size-2 rounded-full',
+                (isChannel || dmUser?.online !== false) ? 'bg-ok' : 'bg-muted-foreground/60',
               )}
               aria-hidden="true"
             />
-            {isChannel ? `${room.onlineCount} online` : dmUser?.online ? 'Online' : 'Offline'}
+            {isChannel ? `${room.onlineCount} online` : 'Online'}
           </span>
           <button
             type="button"
@@ -179,22 +179,35 @@ export function ChatStream({
             >
               {messages.map((message) => {
                 const outgoing =
+                  message.authorId === (session?.userId || '') ||
                   message.authorId === currentUserName ||
                   message.authorId === ME_ID ||
                   message.authorId === 'guest'
+                const fallbackName = room.type === 'dm' ? room.name : message.authorId
                 const author = USERS[message.authorId] ?? {
                   id: message.authorId,
-                  name: message.authorId,
-                  initials: message.authorId.slice(0, 2).toUpperCase(),
+                  name: fallbackName,
+                  initials: fallbackName.slice(0, 2).toUpperCase(),
                   online: true,
                 }
+                const displayName = outgoing
+                  ? currentUserName
+                  : room.type === 'dm'
+                  ? room.name
+                  : author.name
+                const displayInitials = outgoing
+                  ? currentUserInitials
+                  : room.type === 'dm'
+                  ? room.name.slice(0, 2).toUpperCase()
+                  : author.initials
+
                 return (
                   <MessageItem
                     key={message.id}
                     message={message}
                     author={author}
-                    displayName={outgoing ? currentUserName : author.name}
-                    displayInitials={outgoing ? currentUserInitials : author.initials}
+                    displayName={displayName}
+                    displayInitials={displayInitials}
                     outgoing={outgoing}
                     highlighted={pulseActive && room.id === MAIN_ROOM_ID && !!message.pulseKind}
                   />

@@ -2,28 +2,43 @@
 
 import { useState } from 'react'
 import { Search } from 'lucide-react'
-import { ME_ID, USERS } from '@/lib/pulse/data'
 import { Avatar } from './avatar'
 import { Modal } from './modal'
 
+export interface ChatPeer {
+  id: string
+  name: string
+  email?: string
+  online?: boolean
+}
+
 interface NewChatModalProps {
   open: boolean
+  users: ChatPeer[]
   existingUserIds: string[]
   onClose: () => void
   onPick: (userId: string) => void
 }
 
-function PeerPicker({ existingUserIds, onPick }: Pick<NewChatModalProps, 'existingUserIds' | 'onPick'>) {
+function getInitials(name: string): string {
+  const parts = name.split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return 'U'
+  return parts.slice(0, 2).map((p) => p[0].toUpperCase()).join('')
+}
+
+function PeerPicker({ users, existingUserIds, onPick }: Pick<NewChatModalProps, 'users' | 'existingUserIds' | 'onPick'>) {
   const [query, setQuery] = useState('')
-  const peers = Object.values(USERS).filter(
-    (user) => user.id !== ME_ID && user.name.toLowerCase().includes(query.trim().toLowerCase()),
+  const filtered = users.filter(
+    (user) =>
+      user.name.toLowerCase().includes(query.trim().toLowerCase()) ||
+      (user.email && user.email.toLowerCase().includes(query.trim().toLowerCase())),
   )
 
   return (
     <div className="flex flex-col gap-3">
       <div className="relative">
         <label htmlFor="peer-search" className="sr-only">
-          Search campus peers
+          Search registered teammates
         </label>
         <Search
           className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
@@ -33,29 +48,30 @@ function PeerPicker({ existingUserIds, onPick }: Pick<NewChatModalProps, 'existi
           id="peer-search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search campus peers..."
+          placeholder="Search teammates by name or email..."
           autoComplete="off"
           className="h-9 w-full rounded-lg border border-border bg-background pl-8 pr-3 text-[13px] text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-pulse"
         />
       </div>
 
       <ul className="flex max-h-72 flex-col gap-0.5 overflow-y-auto">
-        {peers.map((user) => (
+        {filtered.map((user) => (
           <li key={user.id}>
             <button
               type="button"
               onClick={() => onPick(user.id)}
               className="flex w-full items-center gap-2.5 rounded-lg border border-transparent px-2 py-2 text-left transition-colors hover:border-border hover:bg-panel-2"
             >
-              <Avatar initials={user.initials} online={user.online} showPresence />
+              <Avatar initials={getInitials(user.name)} online={user.online ?? true} showPresence />
               <span className="flex min-w-0 flex-1 flex-col">
                 <span className="truncate text-[13px] font-medium text-foreground">
                   {user.name}
-                  {user.role && <span className="text-muted-foreground"> ({user.role})</span>}
                 </span>
-                <span className="font-mono text-[11px] text-muted-foreground">
-                  {user.online ? 'Online' : 'Offline'}
-                </span>
+                {user.email && (
+                  <span className="font-mono text-[11px] text-muted-foreground truncate">
+                    {user.email}
+                  </span>
+                )}
               </span>
               <span className="font-mono text-[10px] text-muted-foreground">
                 {existingUserIds.includes(user.id) ? 'OPEN' : 'START'}
@@ -63,18 +79,20 @@ function PeerPicker({ existingUserIds, onPick }: Pick<NewChatModalProps, 'existi
             </button>
           </li>
         ))}
-        {peers.length === 0 && (
-          <li className="px-2 py-6 text-center text-xs text-muted-foreground">No peers match &quot;{query}&quot;.</li>
+        {filtered.length === 0 && (
+          <li className="px-2 py-6 text-center text-xs text-muted-foreground">
+            {users.length === 0 ? 'No other registered teammates found.' : `No teammates match "${query}".`}
+          </li>
         )}
       </ul>
     </div>
   )
 }
 
-export function NewChatModal({ open, existingUserIds, onClose, onPick }: NewChatModalProps) {
+export function NewChatModal({ open, users, existingUserIds, onClose, onPick }: NewChatModalProps) {
   return (
-    <Modal open={open} onClose={onClose} title="New Chat" description="Pick a campus peer to start a 1-on-1 conversation.">
-      <PeerPicker existingUserIds={existingUserIds} onPick={onPick} />
+    <Modal open={open} onClose={onClose} title="New Direct Message" description="Select a registered teammate to start a 1-on-1 private chat.">
+      <PeerPicker users={users} existingUserIds={existingUserIds} onPick={onPick} />
     </Modal>
   )
 }
