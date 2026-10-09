@@ -693,6 +693,10 @@ export function Workspace() {
 
       const data = await res.json()
 
+      if (data?.engine === 'fallback') {
+        console.warn('[Pulse] Gemini was not used, showing basic fallback parse. Reason:', data.fallbackReason)
+      }
+
       if (res.ok && data) {
         setSynthesisData(data)
         setPulseActive(true)

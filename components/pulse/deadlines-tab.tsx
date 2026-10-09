@@ -53,10 +53,10 @@ export function DeadlinesTab({ converted, onConvert, deadlines }: DeadlinesTabPr
               <p className="font-mono text-[11px] text-muted-foreground">
                 {dateText} • Source: {sourceText}
               </p>
-              {isUrgent && (
+              {isUrgent && item.dueAt && (
                 <p className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
                   T-minus
-                  <Countdown className="font-semibold text-danger" />
+                  <Countdown target={item.dueAt} className="font-semibold text-danger" />
                 </p>
               )}
               <div className="flex flex-wrap gap-1.5">

@@ -62,6 +62,8 @@ export interface DeadlineItem {
   source?: string
   urgency?: 'URGENT' | 'SOON'
   calendarUrl?: string
+  /** Absolute due instant (ISO). Used for the live T-minus countdown. */
+  dueAt?: string
 }
 
 export interface PulseSynthesisData {

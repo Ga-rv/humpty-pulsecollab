@@ -64,9 +64,53 @@ function AuthForm({ onClose, onSubmit }: Omit<AuthModalProps, 'open'>) {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [view, setView] = useState<'auth' | 'forgot'>('auth')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [notice, setNotice] = useState<string | null>(null)
+
+  const submitReset = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!EMAIL_PATTERN.test(email.trim())) {
+      setError('Enter a valid email address.')
+      return
+    }
+    if (password.length < 6) {
+      setError('New password must be at least 6 characters.')
+      return
+    }
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.')
+      return
+    }
+    setError(null)
+    setLoading(true)
+
+    try {
+      const res = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim(), newPassword: password }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not reset password')
+      }
+      // Back to sign-in with the email kept, so the user signs in with the new password.
+      setPassword('')
+      setConfirmPassword('')
+      setMode('sign-in')
+      setView('auth')
+      setNotice('Password updated. Sign in with your new password.')
+    } catch (err: unknown) {
+      setError((err as Error).message || 'Could not reset password')
+    } finally {
+      setLoading(false)
+    }
+  }
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
+    setNotice(null)
     if (mode === 'create' && username.trim().length < 2) {
       setError('Choose a username with at least 2 characters.')
       return
@@ -122,6 +166,72 @@ function AuthForm({ onClose, onSubmit }: Omit<AuthModalProps, 'open'>) {
     }
   }
 
+  if (view === 'forgot') {
+    return (
+      <div className="flex flex-col gap-4">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">Reset your password</h3>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Enter your account email and choose a new password.
+          </p>
+        </div>
+
+        <form onSubmit={submitReset} className="flex flex-col gap-3" noValidate>
+          <Field
+            label="Email"
+            type="email"
+            value={email}
+            onChange={setEmail}
+            autoComplete="email"
+            placeholder="you@campus.edu"
+          />
+          <Field
+            label="New Password"
+            type="password"
+            value={password}
+            onChange={setPassword}
+            autoComplete="new-password"
+            placeholder="At least 6 characters"
+          />
+          <Field
+            label="Confirm New Password"
+            type="password"
+            value={confirmPassword}
+            onChange={setConfirmPassword}
+            autoComplete="new-password"
+            placeholder="Repeat new password"
+          />
+
+          <p role="alert" className="min-h-4 text-xs text-danger">
+            {error}
+          </p>
+
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setView('auth')
+                setError(null)
+                setPassword('')
+                setConfirmPassword('')
+              }}
+              className="h-9 rounded-lg border border-border px-3 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Back to Sign In
+            </button>
+            <button
+              type="submit"
+              disabled={loading}
+              className="h-9 rounded-lg bg-foreground px-4 text-[13px] font-semibold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {loading ? 'Updating...' : 'Reset Password'}
+            </button>
+          </div>
+        </form>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div role="tablist" aria-label="Authentication mode" className="flex rounded-lg border border-border bg-background p-0.5">
@@ -139,6 +249,7 @@ function AuthForm({ onClose, onSubmit }: Omit<AuthModalProps, 'open'>) {
             onClick={() => {
               setMode(id)
               setError(null)
+              setNotice(null)
             }}
             className={cn(
               'flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
@@ -171,6 +282,27 @@ function AuthForm({ onClose, onSubmit }: Omit<AuthModalProps, 'open'>) {
           placeholder="At least 6 characters"
         />
 
+        {mode === 'sign-in' && (
+          <button
+            type="button"
+            onClick={() => {
+              setView('forgot')
+              setError(null)
+              setNotice(null)
+              setPassword('')
+              setConfirmPassword('')
+            }}
+            className="-mt-1 self-end text-xs text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline"
+          >
+            Forgot password?
+          </button>
+        )}
+
+        {notice && (
+          <p role="status" className="text-xs text-ok">
+            {notice}
+          </p>
+        )}
         <p role="alert" className="min-h-4 text-xs text-danger">
           {error}
         </p>

@@ -8,7 +8,10 @@ import { User } from '@/models/User'
 import { Synthesis } from '@/models/Synthesis'
 import { verifyAuthToken } from '@/lib/auth'
 
-const DEFAULT_GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash']
+// gemini-2.0-flash / gemini-1.5-flash are SHUT DOWN (every call 404s), and gemini-2.5-flash
+// retires on Oct 16 2026. Keep this list on current Flash models; set GEMINI_MODEL in the
+// environment to override without a code change. Unknown/retired IDs are skipped automatically.
+const DEFAULT_GEMINI_MODELS = ['gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-3.8-flash']
 const TZ = 'Asia/Kolkata'
 
 export interface DeadlineItem {
@@ -21,6 +24,8 @@ export interface DeadlineItem {
   urgency?: 'URGENT' | 'SOON'
   source?: string
   calendarUrl?: string
+  /** Absolute due instant (ISO, UTC). Drives the real T-minus countdown on the client. */
+  dueAt?: string
 }
 
 export interface ActionItem {
@@ -38,6 +43,8 @@ export interface SynthesisResponse {
   unresolved?: string[]
   /** Which path produced this result. Handy for debugging on Vercel. */
   engine?: 'gemini' | 'fallback'
+  /** Why Gemini wasn't used (only set when engine === 'fallback'). */
+  fallbackReason?: string
 }
 
 interface ChatMessage {
@@ -114,6 +121,69 @@ function resolveRelativeDay(word: string, base: Date): string {
   const offset = /tomorrow/i.test(word) ? 1 : 0
   const d = new Date(base.getTime() + offset * 24 * 60 * 60 * 1000)
   return formatMonDay(d)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Due-date resolution (for the T-minus countdown) + scan scope              */
+/* -------------------------------------------------------------------------- */
+
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000 // Asia/Kolkata has no DST
+const MON_INDEX: Record<string, number> = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+}
+
+function istParts(d: Date): { y: number; m: number; day: number } {
+  const ist = new Date(d.getTime() + IST_OFFSET_MS)
+  return { y: ist.getUTCFullYear(), m: ist.getUTCMonth(), day: ist.getUTCDate() }
+}
+
+/**
+ * Turns "Oct 11" + "10:00 AM" (IST) into an absolute ISO instant.
+ * No time given -> end of that day (11:59 PM). No year given -> current year,
+ * rolling to next year if that would land more than ~6 months in the past.
+ */
+export function computeDueAt(date?: string, time?: string, now: Date = new Date()): string | undefined {
+  if (!date) return undefined
+  const dm = date.match(/([a-zA-Z]{3,9})\.?\s+(\d{1,2})/)
+  if (!dm) return undefined
+  const month = MON_INDEX[dm[1].slice(0, 3).toLowerCase()]
+  const day = parseInt(dm[2], 10)
+  if (month === undefined || !(day >= 1 && day <= 31)) return undefined
+
+  let hour = 23
+  let minute = 59
+  const tm = (time || date).match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i)
+  if (tm) {
+    hour = parseInt(tm[1], 10) % 12
+    if (tm[3].toUpperCase() === 'PM') hour += 12
+    minute = parseInt(tm[2], 10)
+  }
+
+  let year = istParts(now).y
+  const build = (y: number) => Date.UTC(y, month, day, hour, minute) - IST_OFFSET_MS
+  let ms = build(year)
+  if (ms < now.getTime() - 183 * 24 * 60 * 60 * 1000) ms = build(year + 1)
+  return new Date(ms).toISOString()
+}
+
+/** Adds dueAt to a deadline (used for freshly built and previously saved ones). */
+export function withDueAt<T extends { date?: string; time?: string; dueAt?: string }>(d: T): T {
+  if (!d || d.dueAt) return d
+  const dueAt = computeDueAt(d.date, d.time)
+  return dueAt ? { ...d, dueAt } : d
+}
+
+export type ScanScope = 'last50' | 'today'
+
+/** "today" keeps only messages sent on the current IST calendar day. */
+function applyScope(messages: ChatMessage[], scope: ScanScope): ChatMessage[] {
+  if (scope !== 'today') return messages
+  const t = istParts(new Date())
+  return messages.filter((m) => {
+    if (!m.sentAt) return true // unknown time: keep rather than silently drop
+    const p = istParts(new Date(m.sentAt))
+    return p.y === t.y && p.m === t.m && p.day === t.day
+  })
 }
 
 /* -------------------------------------------------------------------------- */
@@ -386,6 +456,7 @@ export function extractDynamicSynthesis(
       time,
       priority: 'High',
       source: 'Conversation',
+      dueAt: computeDueAt(date, time),
     })
   }
 
@@ -457,42 +528,49 @@ function buildSystemPrompt(): string {
     hour: 'numeric', minute: '2-digit', hour12: true,
   })
 
-  return `You extract events, deadlines and action items from a chat between teammates.
-Current date/time: ${now} (${TZ}). Each message may be prefixed with the time it was sent.
+  return `You read a chat transcript between teammates and extract (1) scheduled events/deadlines and (2) action items.
+Current date/time: ${now} (${TZ}). Every transcript line looks like "[Mon D, h:mm AM/PM] Sender Name: message", where the bracket is when it was sent.
+Messages are casual, lowercase and full of typos. Read for meaning, never copy chat wording into the output.
 
-CRITICAL RULES FOR EVENT HEADER NAMES (title):
-- title MUST be ONLY the clean, official name of the event or deadline as a short noun phrase (1-4 words), Title Case.
-- NEVER include conversational sentence fragments or chat phrases like "Name Of This Event Is", "Theres An Even Coming Up", "I Think Of", "We Have", "Remember To", "Submit The", "Please Be Late", "Is Scheduled For".
-- NEVER use generic titles like "Untitled Event", "Event", "Meeting", "Upcoming Event" if ANY specific topic, platform, project, or name is mentioned anywhere in the conversation.
-- Multi-turn name resolution:
-  * "there is an event on 8th october at 5 pm..." followed by "name of this event is abc" or "is it abc?" -> Title MUST be "abc" (or "abc Event").
-  * "theres an even coming up on 11th october 10 am i think of stac" -> Title MUST be "STAC Event" (or "STAC").
-  * "submit the Devpost project by 11:30 PM tonight" -> Title MUST be "Devpost Submission".
-  * "Hackathon presentation on Sunday, 12th october at 5:00 PM" -> Title MUST be "Hackathon Presentation".
-  * "robotics demo tomorrow at 4 pm" -> Title MUST be "Robotics Demo".
-  * "design review is scheduled for friday at 2 pm" -> Title MUST be "Design Review".
-- Keep acronyms and proper nouns exact (e.g. "STAC", "Devpost", "API", "UI").
-- date: "Mon D" format, e.g. "Oct 11". Resolve "today", "tonight", "tomorrow", and weekdays relative to the time the message was sent (or the current date if unknown). If both a weekday and a date are given, trust the explicit date.
-- time: "h:mm AM/PM", e.g. "6:00 PM". Empty string if no time was given. If am/pm is missing, infer it from context (an evening event is PM).
+=== EVENTS / DEADLINES (deadlines[]) ===
+Include only things that have a date and/or a time. Ignore vague talk with no schedule.
 
-LINK CONTEXT ACROSS NEIGHBORING MESSAGES
-The event name and its date/time are often split across two nearby messages, from either sender, in either order. Treat them as ONE event and output ONE entry.
-- Name first, date later: "we have the design review" ... "it's on friday at 2" -> "Design Review", the Friday date, 2:00 PM.
-- Date first, name later: "something's happening on 3rd March at 4pm" ... "it's the robotics demo" -> "Robotics Demo", Mar 3, 4:00 PM.
-- Clarification: "there is an event on 8th oct" ... "name of this event is abc" -> "abc", Oct 8.
-Only link messages that are clearly about the same thing and sit within a couple of messages of each other. Chatter in between ("ok", "cool") does not break the link.
+title:
+- The short NAME of the event, as a noun phrase of 1-4 words in Title Case ("Design Review", "Devpost Submission", "Music Jam").
+- It is a label, NOT a sentence. It must never contain chat phrases or verbs of the conversation ("there is", "remember to", "don't forget", "I think", "coming up", "be there", "name of this event is").
+- Keep acronyms and proper nouns exactly ("STAC", "Devpost", "Hacktoberfest", "API").
+- If the person names the event ("it's called X", "name is X", "is it X?" / "yeah"), use X.
+- For a submission/hand-in use "<Thing> Submission"; for a talk or demo use "<Topic> Presentation" / "<Topic> Demo".
+- Never output "Event", "Untitled Event", "Meeting", "Upcoming Event" if any specific name/topic is mentioned in nearby messages. If truly nothing identifies it, use "Team Event".
 
-RULES
-- One entry per real event. If an event is mentioned again (reminders), merge into one entry. If its date or time is later changed, use the latest version.
-- Never bleed or copy a title from one event onto a different, unrelated event.
-- Only include items that have a date or a time. Ignore vague talk with no schedule.
-- priority: "High" for hard deadlines, submissions, presentations, or anything within 48 hours; "Medium" for other planned events; "Low" for casual/optional ones.
+Name and date/time are often split across neighbouring messages, from either sender, in either order. Merge them into ONE entry. Short chatter in between ("ok", "yeah", "cool") does not break the link. Only merge messages that are clearly about the same thing; never copy a title from one event onto a different event.
 
-ACTION ITEMS
-- Concrete tasks someone committed to or was asked to do. "assignee" is the person's full name exactly as it appears in the transcript. Resolve "I" to the speaker and "you" to the other person in a two-person chat. status is "Pending" unless the chat says otherwise.
-- task: short imperative phrase, e.g. "Build backend API services", "Develop frontend components".
+Examples of the merging (illustrative, not from this chat):
+  "something is on 3rd march at 4pm" ... "it's the robotics demo"  -> title "Robotics Demo", date "Mar 3", time "4:00 PM"
+  "demo day is friday 2pm" ... "wait is it called Launchpad?" ... "yes"  -> title "Launchpad", date = that Friday, time "2:00 PM"
+  "dont forget the quiz on 20th nov"  -> title "Quiz", date "Nov 20", time ""
+  "ravi, send the invoice by 6 pm today"  -> deadline title "Invoice Submission", today's date, "6:00 PM"
 
-SUMMARY: one short sentence.`
+date: "Mon D" (e.g. "Oct 11"), no year. Resolve "today", "tonight", "tomorrow" and weekdays relative to the time the message was SENT (the bracket), not the current time. If a weekday and an explicit date are both given, trust the explicit date.
+time: "h:mm AM/PM" (e.g. "6:00 PM"), or "" if no time was given. If am/pm is missing infer it from context.
+priority: "High" for hard deadlines, submissions, presentations, competitions, or anything within 48 hours of the current time; "Medium" for other planned events; "Low" for casual/optional ones.
+
+One entry per real event. If it is mentioned again (reminder) merge it; if its date/time changes later, use the latest version.
+
+=== ACTION ITEMS (actionItems[]) ===
+A concrete piece of work that a specific person committed to or was asked to do.
+- task: a short imperative phrase starting with a verb, 2-6 words ("Build backend", "Develop frontend", "Submit Devpost project"). Never a question, never a copy of the chat sentence, never include "right?", "tonight", or the assignee's name.
+- assignee: the person's full name exactly as it appears in the transcript. Resolve "I/me/my" to the sender and "you" to the other person in a two-person chat. For "<Name>, do X" the assignee is <Name>.
+- status: "Pending" unless the chat says it is in progress or done.
+- deadline: "Mon D, h:mm AM/PM" (or "Mon D") when the chat gives one for this task, otherwise "".
+- A question like "so I'm doing frontend and you're doing backend right?" followed by agreement or "also I will be doing backend" is a role split: output ONE item per person (e.g. "Build frontend" for the first speaker, "Build backend" for the other). Do not output the question text, and do not output the same task twice.
+- An event that merely has to be attended is a deadline, not an action item, unless someone is asked to prepare or do something for it.
+- Do NOT invent tasks. If nobody committed to anything, return an empty list.
+
+=== SUMMARY ===
+One short plain sentence describing what was found.
+
+Return only JSON matching the schema.`
 }
 
 const responseSchema = {
@@ -503,9 +581,9 @@ const responseSchema = {
       items: {
         type: Type.OBJECT,
         properties: {
-          title: { type: Type.STRING },
-          date: { type: Type.STRING },
-          time: { type: Type.STRING },
+          title: { type: Type.STRING, description: 'Short event name, 1-4 words, Title Case. Not a sentence.' },
+          date: { type: Type.STRING, description: 'Format "Mon D", e.g. "Oct 11".' },
+          time: { type: Type.STRING, description: 'Format "h:mm AM/PM", or empty string if no time.' },
           priority: { type: Type.STRING, enum: ['High', 'Medium', 'Low'] },
         },
         required: ['title', 'date', 'time', 'priority'],
@@ -517,12 +595,13 @@ const responseSchema = {
       items: {
         type: Type.OBJECT,
         properties: {
-          task: { type: Type.STRING },
-          assignee: { type: Type.STRING },
+          task: { type: Type.STRING, description: 'Short imperative phrase starting with a verb, e.g. "Build backend".' },
+          assignee: { type: Type.STRING, description: 'Full name exactly as in the transcript.' },
           status: { type: Type.STRING, enum: ['Pending', 'In Progress', 'Completed'] },
+          deadline: { type: Type.STRING, description: '"Mon D, h:mm AM/PM", "Mon D", or empty string.' },
         },
-        required: ['task', 'assignee', 'status'],
-        propertyOrdering: ['task', 'assignee', 'status'],
+        required: ['task', 'assignee', 'status', 'deadline'],
+        propertyOrdering: ['task', 'assignee', 'status', 'deadline'],
       },
     },
     summary: { type: Type.STRING },
@@ -531,14 +610,32 @@ const responseSchema = {
   propertyOrdering: ['deadlines', 'actionItems', 'summary'],
 }
 
+/**
+ * Gemini already returns a clean title. Only tidy whitespace/quotes and enforce
+ * Title Case. Do NOT run the regex "filler stripper" on it: that was deleting real
+ * words (months, weekdays, leading "the/no/so", etc.) from good titles.
+ */
+function cleanGeminiTitle(raw: string): string {
+  let t = raw.replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, '').replace(/\s+/g, ' ').trim()
+  t = t.replace(/[.:;,!?-]+$/, '').trim()
+  if (!t) return ''
+  if (t.length > 60) t = t.slice(0, 60).trim()
+  // Only re-case if Gemini returned all-lowercase / ALL-CAPS sentence-like text.
+  const hasUpper = /[A-Z]/.test(t)
+  const isAllCapsMulti = /^[A-Z0-9\s]+$/.test(t) && t.includes(' ')
+  return !hasUpper || isAllCapsMulti ? titleCase(t.toLowerCase()) : t
+}
+
+const GENERIC_GEMINI_TITLES = /^(?:event|events|even|upcoming event|untitled event|meeting|reminder|deadline)$/i
+
 function finalizeDeadlines(raw: any[]): DeadlineItem[] {
   const out: DeadlineItem[] = []
   const seen = new Set<string>()
 
   raw.forEach((d, idx) => {
     if (!d) return
-    let title = polishTitle(String(d.title || d.name || ''))
-    if (!title || /^(?:event|even|upcoming event)$/i.test(title)) title = 'Team Event'
+    let title = cleanGeminiTitle(String(d.title || d.name || ''))
+    if (!title || GENERIC_GEMINI_TITLES.test(title)) title = 'Team Event'
 
     const dateRaw = String(d.date || d.due || '').trim()
     const timeRaw = String(d.time || '').trim()
@@ -559,6 +656,7 @@ function finalizeDeadlines(raw: any[]): DeadlineItem[] {
       time,
       priority: (['High', 'Medium', 'Low'].includes(d.priority) ? d.priority : 'High') as DeadlineItem['priority'],
       source: 'Conversation',
+      dueAt: computeDueAt(date, time),
     })
   })
   return out
@@ -617,7 +715,7 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
         if (saved) {
           return NextResponse.json(
             {
-              deadlines: saved.deadlines || [],
+              deadlines: (saved.deadlines || []).map((d: any) => withDueAt(d)),
               actionItems: saved.actionItems || [],
               summary: saved.summary || '',
               updatedAt: saved.updatedAt,
@@ -729,10 +827,19 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
       }
     }
 
-    const validMessages = messages.filter((m) => m && m.text && m.text.trim().length > 0)
+    const scope: ScanScope =
+      String(body?.scope || searchParams.get('scope') || 'last50').toLowerCase() === 'today' ? 'today' : 'last50'
+
+    // DB queries above already cap at the latest 50 messages; "today" narrows further.
+    const nonEmpty = messages.filter((m) => m && m.text && m.text.trim().length > 0)
+    const validMessages = applyScope(nonEmpty, scope)
     if (validMessages.length === 0) {
       return NextResponse.json(
-        { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
+        {
+          deadlines: [],
+          actionItems: [],
+          summary: scope === 'today' && nonEmpty.length > 0 ? 'No messages from today to synthesize.' : 'No messages to synthesize.',
+        },
         { status: 200 }
       )
     }
@@ -746,7 +853,9 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
       .join('\n')
 
     const apiKey = process.env.GEMINI_API_KEY
+    let fallbackReason = ''
     if (!apiKey) {
+      fallbackReason = 'GEMINI_API_KEY is not set'
       console.error('[synthesis] GEMINI_API_KEY is not set in this environment. Using fallback parser.')
     } else {
       try {
@@ -756,7 +865,7 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
         )
 
         let response: any = null
-        let lastError: any = null
+        const modelErrors: string[] = []
 
         for (const model of modelsToTry) {
           try {
@@ -769,15 +878,21 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
                 responseSchema,
               },
             })
-            if (response && response.text) break
+            if (response && response.text) {
+              console.log(`[synthesis] Gemini model "${model}" succeeded`)
+              break
+            }
+            modelErrors.push(`${model}: empty response`)
+            response = null
           } catch (modelErr) {
-            lastError = modelErr
-            console.warn(`[synthesis] Model "${model}" failed, trying next:`, (modelErr as any)?.message || modelErr)
+            const msg = String((modelErr as any)?.message || modelErr).slice(0, 300)
+            modelErrors.push(`${model}: ${msg}`)
+            console.warn(`[synthesis] Model "${model}" failed, trying next:`, msg)
           }
         }
 
         if (!response || !response.text) {
-          throw lastError || new Error('No response from Gemini models')
+          throw new Error(`All Gemini models failed -> ${modelErrors.join(' | ')}`)
         }
 
         const parsed = JSON.parse(cleanJsonResponse(response.text || ''))
@@ -791,14 +906,18 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
           let assignee = String(a.assignee || 'Unassigned').trim()
           if (assignee.toLowerCase() === 'you') assignee = currentUserName
           if (assignee.toLowerCase() === 'partner') assignee = partnerName
-          const task = String(a.task || a.title).trim()
+          let task = String(a.task || a.title).replace(/\s+/g, ' ').trim().replace(/[.?!,;:\s]+$/, '')
+          if (!task) continue
+          task = task.charAt(0).toUpperCase() + task.slice(1)
           const key = `${assignee.toLowerCase()}:${task.toLowerCase().replace(/[^a-z0-9]/g, '')}`
           if (seen.has(key)) continue
           seen.add(key)
+          const deadlineText = String(a.deadline || '').trim()
           actionItems.push({
             task,
             assignee,
             status: (['Pending', 'In Progress', 'Completed'].includes(a.status) ? a.status : 'Pending') as ActionItem['status'],
+            ...(deadlineText ? { deadline: deadlineText } : {}),
           })
         }
 
@@ -831,10 +950,14 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
         // Log the real reason so it shows up in Vercel logs
         const err = geminiError as any
         console.error('[synthesis] Gemini call failed, using fallback parser:', err?.status, err?.message || err)
+        fallbackReason = String(err?.message || err).slice(0, 600)
       }
     }
 
-    return NextResponse.json(extractDynamicSynthesis(validMessages, currentUserName, partnerName), { status: 200 })
+    return NextResponse.json(
+      { ...extractDynamicSynthesis(validMessages, currentUserName, partnerName), fallbackReason },
+      { status: 200 }
+    )
   } catch (error: unknown) {
     console.error('Safe catch-all in processSynthesisRequest:', error)
     return NextResponse.json(
