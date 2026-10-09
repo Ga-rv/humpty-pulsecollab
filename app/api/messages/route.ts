@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { connectToDatabase } from '@/lib/mongodb'
 import { Message } from '@/models/Message'
+import { verifyAuthToken } from '@/lib/auth'
 
 export async function GET(request: NextRequest) {
   try {
+    const decoded = verifyAuthToken(request)
+    if (!decoded || decoded.isGuest || decoded.role === 'Guest') {
+      return NextResponse.json([], { status: 200 })
+    }
+
     const { searchParams } = new URL(request.url)
     const conversationId = searchParams.get('conversationId')
 
@@ -31,6 +37,11 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    const decoded = verifyAuthToken(request)
+    if (!decoded || decoded.isGuest || decoded.role === 'Guest') {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
     const body = await request.json()
     const { conversationId, sender, content } = body
 

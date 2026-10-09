@@ -7,6 +7,8 @@ export interface DecodedUser {
   userId: string
   username: string
   email: string
+  role?: string
+  isGuest?: boolean
 }
 
 export function verifyAuthToken(request: NextRequest): DecodedUser | null {

@@ -57,7 +57,7 @@ export function Sidebar({
   onClose,
   onSignOut,
 }: SidebarProps) {
-  const isGuest = !session || session.isGuest
+  const isGuest = !session || Boolean(session.isGuest) || session.role === 'Guest' || !session.token
 
   return (
     <>
@@ -129,16 +129,22 @@ export function Sidebar({
               >
                 Direct Messages
               </h2>
-              <button
-                type="button"
-                onClick={onNewChat}
-                className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:text-foreground"
-              >
-                <Plus className="size-3" aria-hidden="true" />
-                New Chat
-              </button>
+              {!isGuest && (
+                <button
+                  type="button"
+                  onClick={onNewChat}
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground transition-colors hover:border-muted-foreground/50 hover:text-foreground"
+                >
+                  <Plus className="size-3" aria-hidden="true" />
+                  New Chat
+                </button>
+              )}
             </div>
-            {registeredUsers.length === 0 ? (
+            {isGuest ? (
+              <p className="px-2 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                Sign in to chat
+              </p>
+            ) : registeredUsers.length === 0 ? (
               <p className="px-2 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
                 No registered peers found. Click + New Chat to connect.
               </p>

@@ -77,6 +77,7 @@ export function ChatStream({
     setDraft('')
   }
 
+  const isGuest = !session || Boolean(session.isGuest) || session.role === 'Guest' || !session.token
   const currentUserName = session?.name || 'Guest User'
   const currentUserInitials = session?.initials || 'GU'
 
@@ -152,7 +153,19 @@ export function ChatStream({
       <div className="relative min-h-0 flex-1 overflow-hidden">
         {scanning && <div key={scanKey} className="scan-line" aria-hidden="true" />}
         <div ref={feedRef} className="h-full overflow-y-auto px-3 py-3 sm:px-4">
-          {messages.length === 0 ? (
+          {isGuest ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+              <div className="flex size-12 items-center justify-center rounded-full border border-border bg-panel-2 text-2xl">
+                🔒
+              </div>
+              <h2 className="text-base font-semibold text-foreground">
+                Authentication Required
+              </h2>
+              <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
+                Sign in with a team account to access sprint channels and private direct messages.
+              </p>
+            </div>
+          ) : messages.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
               <div className="flex size-10 items-center justify-center rounded-full border border-border bg-panel-2">
                 {isChannel ? (
@@ -238,15 +251,19 @@ export function ChatStream({
             <input
               id="compose-input"
               value={draft}
+              disabled={isGuest}
               onChange={handleInputChange}
               onBlur={() => onStopTyping?.()}
-              placeholder="Type a message or paste a deadline..."
+              placeholder={isGuest ? 'Sign in to send messages...' : 'Type a message or paste a deadline...'}
               autoComplete="off"
-              className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-pulse"
+              className={cn(
+                'h-9 min-w-0 flex-1 rounded-lg border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-pulse',
+                isGuest && 'cursor-not-allowed opacity-50 bg-panel-2'
+              )}
             />
             <button
               type="submit"
-              disabled={!draft.trim()}
+              disabled={isGuest || !draft.trim()}
               aria-label="Send message"
               className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-panel-2 px-3 text-[13px] font-medium text-foreground transition-colors hover:border-muted-foreground/50 disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -263,8 +280,9 @@ export function ChatStream({
               <select
                 id="scan-scope"
                 value={scope}
+                disabled={isGuest}
                 onChange={(event) => onScopeChange(event.target.value as ScanScope)}
-                className="h-8 appearance-none rounded-lg border border-border bg-background pl-2.5 pr-7 font-mono text-[11px] text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:border-pulse"
+                className="h-8 appearance-none rounded-lg border border-border bg-background pl-2.5 pr-7 font-mono text-[11px] text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:border-pulse disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {(Object.keys(SCOPE_LABEL) as ScanScope[]).map((key) => (
                   <option key={key} value={key}>
@@ -281,10 +299,10 @@ export function ChatStream({
             <button
               type="button"
               onClick={onSynthesize}
-              disabled={scanning}
+              disabled={isGuest || scanning}
               className={cn(
-                'inline-flex h-9 items-center gap-1.5 rounded-lg bg-pulse px-3.5 text-[13px] font-semibold text-background transition-opacity disabled:opacity-70',
-                !scanning && 'pulse-glow hover:opacity-90',
+                'inline-flex h-9 items-center gap-1.5 rounded-lg bg-pulse px-3.5 text-[13px] font-semibold text-background transition-opacity disabled:cursor-not-allowed disabled:opacity-50',
+                !scanning && !isGuest && 'pulse-glow hover:opacity-90',
               )}
             >
               <Zap className="size-4 fill-background" aria-hidden="true" />

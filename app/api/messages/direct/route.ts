@@ -6,8 +6,8 @@ import { verifyAuthToken } from '@/lib/auth'
 export async function GET(request: NextRequest) {
   try {
     const decoded = verifyAuthToken(request)
-    if (!decoded) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (!decoded || decoded.isGuest || decoded.role === 'Guest') {
+      return NextResponse.json([], { status: 200 })
     }
 
     const { searchParams } = new URL(request.url)
@@ -45,7 +45,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const decoded = verifyAuthToken(request)
-    if (!decoded) {
+    if (!decoded || decoded.isGuest || decoded.role === 'Guest') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 

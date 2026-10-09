@@ -82,9 +82,12 @@ export function Workspace() {
 
   // Fetch registered users for 1-to-1 DMs
   const fetchRegisteredUsers = useCallback(() => {
-    const headers: Record<string, string> = {}
-    if (session?.token) {
-      headers['Authorization'] = `Bearer ${session.token}`
+    if (!session?.token || session?.isGuest || session?.role === 'Guest') {
+      setRegisteredUsers([])
+      return
+    }
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${session.token}`,
     }
     fetch('/api/users', { headers })
       .then((res) => (res.ok ? res.json() : null))
@@ -94,7 +97,7 @@ export function Workspace() {
         }
       })
       .catch((err) => console.warn('Failed to fetch registered users:', err))
-  }, [session?.token])
+  }, [session?.token, session?.isGuest, session?.role])
 
   useEffect(() => {
     fetchRegisteredUsers()
@@ -160,7 +163,7 @@ export function Workspace() {
   // 1-on-1 DIRECT MESSAGE POLLING SYNC (every 2000ms when inside an active DM thread)
   useEffect(() => {
     if (!activeRoomId.startsWith('dm-')) return
-    if (!session?.token) return
+    if (!session?.token || session?.isGuest || session?.role === 'Guest') return
 
     const targetUserId = activeRoomId.replace(/^dm-/, '')
 
@@ -216,7 +219,7 @@ export function Workspace() {
     // 2000ms polling interval
     const intervalId = setInterval(pollDirectMessages, 2000)
     return () => clearInterval(intervalId)
-  }, [activeRoomId, session?.token])
+  }, [activeRoomId, session?.token, session?.isGuest, session?.role])
 
   // Channel messages & tasks fetcher
   useEffect(() => {
@@ -226,11 +229,20 @@ export function Workspace() {
       socketRef.current.emit('join_room', activeRoomId)
     }
 
+    if (!session?.token || session?.isGuest || session?.role === 'Guest') {
+      return
+    }
+
     // Fetch messages from MongoDB for active channel
-    fetch(`/api/messages?conversationId=${encodeURIComponent(activeRoomId)}`)
+    fetch(`/api/messages?conversationId=${encodeURIComponent(activeRoomId)}`, {
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+      },
+    })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data?.messages && Array.isArray(data.messages)) {
+        const rawList = Array.isArray(data) ? data : data?.messages
+        if (rawList && Array.isArray(rawList)) {
           interface DbMsg {
             _id?: string
             id?: string
@@ -239,7 +251,7 @@ export function Workspace() {
             content: string
             createdAt: string
           }
-          const dbMsgs: Message[] = data.messages.map((m: DbMsg) => ({
+          const dbMsgs: Message[] = rawList.map((m: DbMsg) => ({
             id: m._id || m.id || `db-${Date.now()}`,
             roomId: m.conversationId,
             authorId: m.sender,
@@ -279,7 +291,7 @@ export function Workspace() {
         }
       })
       .catch(() => {})
-  }, [activeRoomId, session?.email])
+  }, [activeRoomId, session?.token, session?.isGuest, session?.role])
 
   const nextId = useCallback((prefix: string) => {
     idCounter.current += 1
@@ -307,6 +319,11 @@ export function Workspace() {
 
   const handleSend = useCallback(
     (text: string) => {
+      if (!session?.token || session?.isGuest || session?.role === 'Guest') {
+        setAuthOpen(true)
+        return
+      }
+
       const msgId = nextId('msg')
       const time = formatTime()
 
@@ -400,7 +417,10 @@ export function Workspace() {
       // Persist to MongoDB
       fetch('/api/messages', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.token}`,
+        },
         body: JSON.stringify({
           conversationId: roomId,
           sender: currentUserName,
@@ -408,7 +428,7 @@ export function Workspace() {
         }),
       }).catch((err) => console.warn('Failed to persist message to DB:', err))
     },
-    [activeRoomId, appendMessage, currentUserName, nextId, session?.token, session?.userId],
+    [activeRoomId, appendMessage, currentUserName, nextId, session?.token, session?.userId, session?.isGuest, session?.role],
   )
 
   const handleTypingEvent = useCallback(() => {
@@ -583,6 +603,7 @@ export function Workspace() {
     setDrawerOpen(false)
 
     setSession(GUEST_SESSION)
+    setRegisteredUsers([])
 
     if (socketRef.current && socketRef.current.connected) {
       socketRef.current.emit('join_room', MAIN_ROOM_ID)
@@ -634,6 +655,7 @@ export function Workspace() {
   }
 
   const typingUserId = typing && typing.roomId === activeRoomId ? typing.userId : null
+  const isGuest = !session || Boolean(session.isGuest) || session.role === 'Guest' || !session.token
 
   return (
     <div className="flex h-dvh w-full overflow-hidden bg-background">
@@ -659,7 +681,7 @@ export function Workspace() {
       <main className="relative flex min-w-0 flex-1">
         <ChatStream
           room={room}
-          messages={messages[activeRoomId] ?? []}
+          messages={isGuest ? [] : (messages[activeRoomId] ?? [])}
           session={session}
           pulseActive={pulseActive}
           scanning={scanning}
