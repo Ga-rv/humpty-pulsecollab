@@ -92,7 +92,7 @@ export function Sidebar({
               id="rooms-heading"
               className="px-2 pb-1.5 pt-1 font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
             >
-              Sprint Channels / War Rooms
+              Community Rooms
             </h2>
             <ul className="flex flex-col gap-0.5">
               {CHANNELS.map((room) => {

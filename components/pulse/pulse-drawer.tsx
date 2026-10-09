@@ -86,7 +86,7 @@ export function PulseDrawer({
     <>
       <div className="fixed inset-0 z-30 bg-black/60 xl:hidden" onClick={onClose} aria-hidden="true" />
       <aside
-        aria-label="Pulse War Room"
+        aria-label="Pulse"
         className="fixed inset-y-0 right-0 z-40 flex w-[min(380px,100vw)] shrink-0 flex-col border-l border-border bg-panel animate-in slide-in-from-right duration-200 xl:static xl:z-auto xl:w-[380px]"
       >
         <header className="flex items-start justify-between gap-2 border-b border-border px-3 py-2.5">

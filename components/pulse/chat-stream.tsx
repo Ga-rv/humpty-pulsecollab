@@ -171,7 +171,7 @@ export function ChatStream({
                 Authentication Required
               </h2>
               <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-                Sign in with a team account to access sprint channels and private direct messages.
+                Sign in to join the IIT Mandi community rooms and send private direct messages.
               </p>
             </div>
           ) : visibleMessages.length === 0 ? (

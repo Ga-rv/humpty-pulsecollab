@@ -9,28 +9,30 @@ export const USERS: Record<string, User> = {
 
 export const INITIAL_DM_USER_IDS: string[] = []
 
+// NOTE: keep each `id` stable. It is the key that saved messages, synthesis and tasks are stored
+// under in MongoDB. Only `name` / `context` are what people see, so those are safe to change.
 export const CHANNELS: Room[] = [
   {
     id: MAIN_ROOM_ID,
-    name: 'first-commit-sprint',
+    name: 'kamand-commons',
     type: 'channel',
-    context: 'Context: First Commit Hackathon | Target: 11:59 PM',
+    context: 'IIT Mandi community | Hang out, ask anything',
     onlineCount: 1,
     responderId: '',
   },
   {
     id: 'campus-announcements',
-    name: 'campus-announcements',
+    name: 'campus-notices',
     type: 'channel',
-    context: 'Context: Campus Ops | Broadcast channel',
+    context: 'IIT Mandi | Events, deadlines & announcements',
     onlineCount: 1,
     responderId: '',
   },
   {
     id: 'backend-ops',
-    name: 'backend-ops',
+    name: 'mandi-builders',
     type: 'channel',
-    context: 'Context: Infra & APIs',
+    context: 'IIT Mandi | Projects, hackathons & tech talk',
     onlineCount: 1,
     responderId: '',
   },
