@@ -134,12 +134,14 @@ export function extractDynamicSynthesis(
       }
 
       let title = 'STAC Event'
-      if (/\bSTAC\s+Event\b/i.test(text)) {
+      if (/\bdevpost\b/i.test(text)) {
+        title = 'Devpost Submission'
+      } else if (/\bSTAC\s+Event\b/i.test(text)) {
         title = 'STAC Event'
       } else if (/\babc\s+Meeting\b/i.test(text)) {
         title = 'abc Meeting'
-      } else if (/\babc\b/i.test(text)) {
-        title = 'abc Meeting'
+      } else if (/\babc\b/i.test(text) || messages.some((other) => /\babc\b/i.test(other.text))) {
+        title = 'abc'
       } else {
         const eventNameMatch =
           text.match(/(?:(?:yes|and|also|so|the|our|we\s+have|an|a)\s+)?([A-Z0-9][a-zA-Z0-9_\-\s]{1,30}?)\s+(?:event|meeting|sync|presentation|demo|hackathon|workshop)/i) ||
@@ -496,7 +498,10 @@ Conversation Transcript:
 ${transcript}
 
 Instructions & Rules:
-- Event Titles: Extract specific event names (e.g., 'STAC Event', 'abc Meeting'). Never use the generic word 'Event' as the title. If an event is mentioned without an explicit proper noun, infer a descriptive title such as 'STAC Event', 'Sprint Milestone', or 'Team Sync'.
+- Multi-Turn Context Stitching: When an event or meeting is mentioned and followed by a name clarification (e.g., User A says 'there is an event...', User B asks 'is it abc?', User A confirms 'yeah'), synthesize the confirmed name ('abc') as the event title. NEVER use conversational chat phrases like 'Okay look there is an event' as a title.
+- Explicit Titles: Extract the exact project, platform, or meeting name directly associated with the deadline (e.g., 'submit the Devpost project' -> Title: 'Devpost Submission' or 'Devpost Project').
+- Strict Isolation: Each deadline/event must extract its own independent title from its specific message context. NEVER duplicate or carry over titles from previous events (e.g., do not label a Devpost submission as 'STAC Event').
+- Event Titles: Extract specific event names (e.g., 'STAC Event', 'abc Meeting', 'Devpost Submission'). Never use the generic word 'Event' as the title. If an event is mentioned without an explicit proper noun, infer a descriptive title such as 'STAC Event', 'Sprint Milestone', or 'Team Sync'.
 - Action Items: Rewrite conversational fragments into clean, professional tasks (e.g., turn 'so im doing front end and you are doing backend right?' into 'Develop frontend components' assigned to Garv Dharmapuri, and 'Build backend API services' assigned to Ishaan Pande). Never output fragments like 'Be doing backend' or 'Backend'. Every task must begin with a strong action verb (e.g., 'Develop', 'Build', 'Design', 'Review', 'Prepare', 'Test').
 - Names: Use actual participant names ('Garv Dharmapuri', 'Ishaan Pande'). Never output 'You' or 'Partner'. If a name is not explicitly mentioned, use the sender's actual display name from the transcript.
 - Deduplicate: Ensure only one distinct task exists per person per objective. Merge duplicate or overlapping tasks.
@@ -504,7 +509,7 @@ Instructions & Rules:
 Return strictly valid JSON matching this schema (no markdown fences, no extra text):
 {
   "deadlines": [
-    { "title": "string", "date": "string", "priority": "High | Medium | Low" }
+    { "title": "string (Clean, short title e.g. 'abc', 'STAC Event', 'Devpost Submission')", "date": "string", "priority": "High | Medium | Low" }
   ],
   "actionItems": [
     { "task": "string", "assignee": "string", "status": "Pending" }
