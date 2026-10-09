@@ -152,7 +152,7 @@ export function extractDynamicSynthesis(
           text.match(/(?:even|event|meeting|meet|sync|deadline|call|hackathon)\s+(?:of|for|i think of)\s+([A-Za-z0-9_\-]+)/i) ||
           text.match(/(?:the|our|an?)\s+([A-Za-z0-9_\-]+)\s+(?:even|event|meeting|meet|sync|deadline|hackathon|project)/i) ||
           text.match(/(?:submit|deploy|finish|complete)\s+(?:the\s+)?([A-Za-z0-9_\-]+)\s*(?:project|repo|submission|task)?/i) ||
-          text.match(/([A-Z0-9][a-zA-Z0-9_\-]{2,30})\s+(?:on|by|at|before)\s+(?:\d{1,2}(?:st|nd|rd|th)?|today|tomorrow|tonight)/i)
+          text.match(/^(.+?)\s+(?:on|by|at|before)\s+(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)[,\s]+)?(?:\d{1,2}|today|tomorrow|tonight)/i)
 
         if (directSubject && directSubject[1]) {
           title = directSubject[1].trim()
@@ -163,7 +163,7 @@ export function extractDynamicSynthesis(
       }
 
       title = title.replace(/^(?:yes|no|and|also|so|the|our|we\s+have|an|a|okay\s+look\s+there\s+is\s+an?\s+event|look\s+there\s+is\s+an?\s+event|there\s+is\s+an?\s+event)\s+/i, '').trim()
-
+      title = title.replace(/\b(january|february|march|april|may|june|july|august|september|october|november|december|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/gi, '').trim()
       if (!title || title.toLowerCase() === 'event' || title.toLowerCase() === 'upcoming event') {
         title = 'Team Event'
       }
