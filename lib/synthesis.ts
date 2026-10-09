@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { GoogleGenAI } from '@google/genai'
+import { GoogleGenAI, Type } from '@google/genai'
 import mongoose from 'mongoose'
 import { connectToDatabase } from '@/lib/mongodb'
 import { Message } from '@/models/Message'
 import { DirectMessage } from '@/models/DirectMessage'
 import { User } from '@/models/User'
 import { verifyAuthToken } from '@/lib/auth'
+
+const GEMINI_MODEL = 'gemini-2.5-flash'
+const TZ = 'Asia/Kolkata'
 
 export interface DeadlineItem {
   id?: string
@@ -32,386 +35,508 @@ export interface SynthesisResponse {
   summary: string
   decisions?: string[]
   unresolved?: string[]
+  /** Which path produced this result. Handy for debugging on Vercel. */
+  engine?: 'gemini' | 'fallback'
 }
 
 interface ChatMessage {
   sender: string
   text: string
+  sentAt?: string // ISO timestamp, used to resolve "tonight" / "tomorrow"
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Small helpers                                                             */
+/* -------------------------------------------------------------------------- */
 
 function cleanJsonResponse(raw: string): string {
   let cleaned = raw.trim()
   const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
-  if (fenceMatch) {
-    return fenceMatch[1].trim()
-  }
+  if (fenceMatch) return fenceMatch[1].trim()
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim()
   }
   return cleaned
 }
 
-function normalizeDateStr(rawDate: string): string {
-  const months: Record<string, string> = {
-    jan: 'Jan', january: 'Jan',
-    feb: 'Feb', february: 'Feb',
-    mar: 'Mar', march: 'Mar',
-    apr: 'Apr', april: 'Apr',
-    may: 'May',
-    jun: 'Jun', june: 'Jun',
-    jul: 'Jul', july: 'Jul',
-    aug: 'Aug', august: 'Aug',
-    sep: 'Sep', sept: 'Sep', september: 'Sep',
-    oct: 'Oct', october: 'Oct',
-    nov: 'Nov', november: 'Nov',
-    dec: 'Dec', december: 'Dec',
-  }
-
-  const m1 = rawDate.match(/(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]+)/i)
-  if (m1) {
-    const monthKey = m1[2].toLowerCase()
-    const monthName = months[monthKey] || m1[2]
-    return `${monthName} ${m1[1]}`
-  }
-
-  const m2 = rawDate.match(/([a-zA-Z]+)\s+(\d{1,2})(?:st|nd|rd|th)?/i)
-  if (m2) {
-    const monthKey = m2[1].toLowerCase()
-    const monthName = months[monthKey] || m2[1]
-    return `${monthName} ${m2[2]}`
-  }
-
-  return rawDate
+const MONTHS: Record<string, string> = {
+  jan: 'Jan', january: 'Jan', feb: 'Feb', february: 'Feb', mar: 'Mar', march: 'Mar',
+  apr: 'Apr', april: 'Apr', may: 'May', jun: 'Jun', june: 'Jun', jul: 'Jul', july: 'Jul',
+  aug: 'Aug', august: 'Aug', sep: 'Sep', sept: 'Sep', september: 'Sep',
+  oct: 'Oct', october: 'Oct', nov: 'Nov', november: 'Nov', dec: 'Dec', december: 'Dec',
 }
 
+function normalizeDateStr(rawDate: string): string {
+  const m1 = rawDate.match(/(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]+)/i)
+  if (m1 && MONTHS[m1[2].toLowerCase()]) return `${MONTHS[m1[2].toLowerCase()]} ${m1[1]}`
+  const m2 = rawDate.match(/([a-zA-Z]+)\s+(\d{1,2})(?:st|nd|rd|th)?/i)
+  if (m2 && MONTHS[m2[1].toLowerCase()]) return `${MONTHS[m2[1].toLowerCase()]} ${m2[2]}`
+  return rawDate.trim()
+}
+
+/** Normalizes "6pm", "18:30", "noon" -> "6:00 PM", "6:30 PM", "12:00 PM". */
 function normalizeTimeStr(rawTime: string): string {
-  const m = rawTime.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i)
-  if (m) {
-    const hour = m[1]
-    const minute = m[2] || '00'
-    const ampm = m[3] ? m[3].toUpperCase() : 'PM'
-    return `${hour}:${minute} ${ampm}`
+  const t = rawTime.trim().toLowerCase()
+  if (t === 'noon') return '12:00 PM'
+  if (t === 'midnight') return '12:00 AM'
+
+  const ampm = t.match(/(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)/i)
+  if (ampm) {
+    const suffix = ampm[3].toLowerCase().startsWith('a') ? 'AM' : 'PM'
+    return `${parseInt(ampm[1], 10)}:${ampm[2] || '00'} ${suffix}`
+  }
+
+  const h24 = t.match(/(\d{1,2}):(\d{2})/)
+  if (h24) {
+    const h = parseInt(h24[1], 10)
+    const suffix = h >= 12 ? 'PM' : 'AM'
+    const h12 = h % 12 === 0 ? 12 : h % 12
+    return `${h12}:${h24[2]} ${suffix}`
   }
   return rawTime.toUpperCase()
 }
 
+function formatMonDay(d: Date): string {
+  return d.toLocaleDateString('en-US', { timeZone: TZ, month: 'short', day: 'numeric' })
+}
+
+function formatStamp(iso?: string): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  return d.toLocaleString('en-US', {
+    timeZone: TZ, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+  })
+}
+
+function resolveRelativeDay(word: string, base: Date): string {
+  const offset = /tomorrow/i.test(word) ? 1 : 0
+  const d = new Date(base.getTime() + offset * 24 * 60 * 60 * 1000)
+  return formatMonDay(d)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Title cleaning (shared by Gemini post-processing and the fallback)         */
+/* -------------------------------------------------------------------------- */
+
+const LEADING_FILLER =
+  /^(?:(?:hey|hi|hello|okay+|ok+|so|and|also|btw|yes|yeah|no|please|pls|just|remember(?:\s+that)?|reminder|don'?t\s+forget|do\s+not\s+forget|make\s+sure|be\s+sure|(?:you|we|i)\s+(?:should|need\s+to|have\s+to|must|will|are\s+going\s+to)|we\s+have|there(?:'s|\s+is)?|theres|an?|the|to\s+be\s+present(?:\s+(?:at|for|in))?|be\s+present(?:\s+(?:at|for|in))?|to\s+be\s+there(?:\s+(?:at|for))?|be\s+there(?:\s+(?:at|for))?|to|your|our)\b[\s,:;-]*)+/i
+
+const WEEKDAYS = /\b(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)(?:day)?\b/gi
+
+function stripFiller(input: string): string {
+  let s = input.trim()
+  let prev = ''
+  while (s !== prev) {
+    prev = s
+    s = s.replace(/^[A-Z][a-z]+,\s+/, '') // leading "Ishaan, ..."
+    s = s.replace(LEADING_FILLER, '')
+    s = s.replace(/[\s,.:;!?-]+$/, '')
+    s = s.replace(/\s+(?:on|at|by|before|from|till|until|is|for|the|a|an|in)$/i, '')
+  }
+  return s.trim()
+}
+
+const SMALL_WORDS = new Set(['of', 'the', 'and', 'for', 'to', 'in', 'on', 'at', 'a', 'an', 'by'])
+
+function titleCase(s: string): string {
+  return s
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w, i) => {
+      if (/[A-Z]/.test(w.slice(1))) return w // STAC, GitHub, DevPost: leave alone
+      const lw = w.toLowerCase()
+      if (i > 0 && SMALL_WORDS.has(lw)) return lw
+      return lw.charAt(0).toUpperCase() + lw.slice(1)
+    })
+    .join(' ')
+}
+
+function polishTitle(raw: string): string {
+  const stripped = stripFiller(raw)
+  if (!stripped) return ''
+  return titleCase(stripped)
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Generic fallback extractor (no hardcoded cases)                            */
+/* -------------------------------------------------------------------------- */
+
+const MONTH_RE =
+  '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+
+const DATE_PATTERNS: RegExp[] = [
+  new RegExp(`\\b\\d{1,2}(?:st|nd|rd|th)?\\s+${MONTH_RE}\\b(?:,?\\s+\\d{4})?`, 'i'),
+  new RegExp(`\\b${MONTH_RE}\\s+\\d{1,2}(?:st|nd|rd|th)?\\b(?:,?\\s+\\d{4})?`, 'i'),
+  /\b(?:today|tomorrow|tonight)\b/i,
+]
+
+const TIME_PATTERNS: RegExp[] = [
+  /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])/i,
+  /\b(?:noon|midnight)\b/i,
+  /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/,
+]
+
+function findFirst(text: string, patterns: RegExp[]): string | null {
+  for (const p of patterns) {
+    const m = text.match(p)
+    if (m) return m[0]
+  }
+  return null
+}
+
+const ACK_ONLY = /^(?:ok+a*y*|yes|yeah|yep|no|sure|thanks|thank you|cool|nice|hmm+|lol|done|got it)$/i
+
+function deriveTitle(text: string, dateRaw: string | null, timeRaw: string | null): string {
+  let s = text
+  if (dateRaw) s = s.replace(dateRaw, ' ')
+  if (timeRaw) s = s.replace(timeRaw, ' ')
+  s = s.replace(WEEKDAYS, ' ').replace(/\s+/g, ' ')
+  return polishTitle(s)
+}
+
+function isNameLike(title: string): boolean {
+  if (!title || ACK_ONLY.test(title)) return false
+  const words = title.split(/\s+/).length
+  return words >= 1 && words <= 8
+}
+
+interface MsgInfo {
+  m: ChatMessage
+  dateRaw: string | null
+  timeRaw: string | null
+  title: string
+}
+
 /**
- * Pure dynamic extractor used when Gemini API key is missing or calls throw.
- * Inspects the actual conversation messages without hardcoded mock strings.
+ * Best-effort extractor used only when Gemini is unavailable or errors.
+ * Handles name and date/time split across adjacent messages.
  */
 export function extractDynamicSynthesis(
   messages: ChatMessage[],
   defaultCurrentUser = 'Garv Dharmapuri',
   defaultPartner = 'Ishaan Pande'
 ): SynthesisResponse {
-  const deadlines: DeadlineItem[] = []
-  const rawActionItems: ActionItem[] = []
-
   const participants = Array.from(new Set(messages.map((m) => m.sender).filter(Boolean)))
   const firstUser = participants[0] || defaultCurrentUser
   const secondUser = participants.find((p) => p !== firstUser) || defaultPartner
 
-  for (const m of messages) {
-    let sender = m.sender || firstUser
-    if (sender.toLowerCase() === 'you') sender = defaultCurrentUser
-    if (sender.toLowerCase() === 'partner') sender = defaultPartner
+  const infos: MsgInfo[] = messages.map((m) => {
+    const dateRaw = findFirst(m.text, DATE_PATTERNS)
+    const timeRaw = findFirst(m.text, TIME_PATTERNS)
+    return { m, dateRaw, timeRaw, title: deriveTitle(m.text, dateRaw, timeRaw) }
+  })
 
+  const toDateStr = (raw: string, m: ChatMessage): string => {
+    if (/^(today|tomorrow|tonight)$/i.test(raw)) {
+      const base = m.sentAt && !isNaN(new Date(m.sentAt).getTime()) ? new Date(m.sentAt) : new Date()
+      return resolveRelativeDay(raw, base)
+    }
+    return normalizeDateStr(raw)
+  }
+
+  // ---- Deadlines ----
+  const deadlines: DeadlineItem[] = []
+  const used = new Set<number>()
+
+  for (let i = 0; i < infos.length; i++) {
+    if (used.has(i)) continue
+    const cur = infos[i]
+    if (!cur.dateRaw && !cur.timeRaw) continue
+
+    let dateRaw = cur.dateRaw
+    let timeRaw = cur.timeRaw
+    let title = cur.title
+    let last = i
+
+    // Date in one message, time in the next (or the other way round)
+    const next = infos[i + 1]
+    if (next && !used.has(i + 1)) {
+      if (dateRaw && !timeRaw && next.timeRaw && !next.dateRaw) {
+        timeRaw = next.timeRaw
+        used.add(i + 1)
+        last = i + 1
+      } else if (!dateRaw && timeRaw && next.dateRaw && !next.timeRaw) {
+        dateRaw = next.dateRaw
+        if (!isNameLike(title)) title = next.title
+        used.add(i + 1)
+        last = i + 1
+      }
+    }
+    if (!dateRaw) continue // a bare time with no date anywhere: not an event
+
+    // Event name in an adjacent message with no date/time of its own
+    if (!isNameLike(title)) {
+      const prev = infos[i - 1]
+      const after = infos[last + 1]
+      if (prev && !prev.dateRaw && !prev.timeRaw && !used.has(i - 1) && isNameLike(prev.title)) {
+        title = prev.title
+      } else if (after && !after.dateRaw && !after.timeRaw && !used.has(last + 1) && isNameLike(after.title)) {
+        title = after.title
+        used.add(last + 1)
+      }
+    }
+    if (!isNameLike(title)) title = 'Untitled Event'
+
+    const date = toDateStr(dateRaw, cur.m)
+    const time = timeRaw ? normalizeTimeStr(timeRaw) : undefined
+    deadlines.push({
+      id: `deadline-${deadlines.length + 1}`,
+      title,
+      date: time ? `${date}, ${time}` : date,
+      time,
+      priority: 'High',
+      source: 'Conversation',
+    })
+  }
+
+  // ---- Action items ----
+  const rawActionItems: ActionItem[] = []
+  const firstNameOf = (full: string) => full.split(/\s+/)[0].toLowerCase()
+
+  for (const m of messages) {
+    const sender = m.sender || firstUser
     const otherUser = sender === firstUser ? secondUser : firstUser
     const text = m.text
 
-    // 1. Detect Deadlines & Events (Never output generic "Event")
-    const dateMatch =
-      text.match(/(\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{4})?)/i) ||
-      text.match(/((?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s+\d{4})?)/i) ||
-      text.match(/\b(today|tomorrow|tonight)\b/i)
-
-    if (dateMatch) {
-      const rawDate = dateMatch[1] || dateMatch[0]
-      const formattedDate = normalizeDateStr(rawDate)
-
-      const timeMatch = text.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm)|11:59\s*pm|midnight|noon)/i)
-      let combinedDate = formattedDate
-      if (timeMatch) {
-        combinedDate = `${formattedDate}, ${normalizeTimeStr(timeMatch[1])}`
-      }
-
-      let title = ''
-
-      // Step 2 - Extract Subject From That Message ONLY (and any direct reply immediately above/below it confirming the name):
-      if (/theres an even coming up on 11th october.*stac/i.test(text) || (/\b11(?:th)?\s*oct|\boct(?:ober)?\s*11\b/i.test(text) && /\bstac\b/i.test(text))) {
-        title = 'STAC Event'
-      } else if (/hacktoberfest on 13th oct/i.test(text) || (/\b13(?:th)?\s*oct|\boct(?:ober)?\s*13\b/i.test(text) && /\bhacktoberfest\b/i.test(text))) {
-        title = 'Hacktoberfest'
-      } else if (/submit the devpost project/i.test(text) || /\bdevpost\b/i.test(text)) {
-        title = 'Devpost Submission'
-      } else if (/name of this event is abc/i.test(text) || (/\b8(?:th)?\s*oct|\boct(?:ober)?\s*8\b/i.test(text) && /\babc\b/i.test(text))) {
-        title = 'abc'
-      } else {
-        // Direct subject extraction from that message
-        const directSubject =
-          text.match(/(?:even|event|meeting|meet|sync|deadline|call|hackathon)\s+(?:of|for|i think of)\s+([A-Za-z0-9_\-]+)/i) ||
-          text.match(/(?:the|our|an?)\s+([A-Za-z0-9_\-]+)\s+(?:even|event|meeting|meet|sync|deadline|hackathon|project)/i) ||
-          text.match(/(?:submit|deploy|finish|complete)\s+(?:the\s+)?([A-Za-z0-9_\-]+)\s*(?:project|repo|submission|task)?/i) ||
-          text.match(/^(.+?)\s+(?:on|by|at|before)\s+(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)[,\s]+)?(?:\d{1,2}|today|tomorrow|tonight)/i)
-
-        if (directSubject && directSubject[1]) {
-          title = directSubject[1].trim()
-          title = title.charAt(0).toUpperCase() + title.slice(1)
-          if (/^stac$/i.test(title)) title = 'STAC Event'
-          if (/^devpost$/i.test(title)) title = 'Devpost Submission'
-        }
-      }
-
-      title = title.replace(/^(?:yes|no|and|also|so|the|our|we\s+have|an|a|okay\s+look\s+there\s+is\s+an?\s+event|look\s+there\s+is\s+an?\s+event|there\s+is\s+an?\s+event)\s+/i, '').trim()
-      title = title.replace(/\b(january|february|march|april|may|june|july|august|september|october|november|december|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/gi, '').trim()
-      if (!title || title.toLowerCase() === 'event' || title.toLowerCase() === 'upcoming event') {
-        title = 'Team Event'
-      }
-
-      deadlines.push({
-        id: `deadline-${deadlines.length + 1}`,
-        title,
-        date: combinedDate,
-        priority: 'High',
-        source: 'Conversation',
-      })
+    const selfMatch =
+      text.match(/\b(?:i\s+will|i'll|i'm\s+going\s+to|i\s+am\s+going\s+to|i\s+can|i\s+shall)\s+(?:be\s+)?(?:doing\s+)?(.{3,60}?)(?=[.,;!?\n]|$)/i) ||
+      text.match(/\b(?:i'm|im|i\s+am)\s+(?:doing|handling|building|working\s+on|taking\s+care\s+of)\s+(.{3,60}?)(?=[.,;!?\n]|$)/i)
+    if (selfMatch) {
+      rawActionItems.push({ task: titleCase(selfMatch[1].trim()), assignee: sender, status: 'Pending' })
     }
 
-    // 2. Specific conversational dialog pairs like "im doing front end and you are doing backend"
-    if (/(?:im|i'm|i\s+am)\s+(?:doing|handling|building)?\s*(?:front\s*end|frontend)/i.test(text)) {
-      rawActionItems.push({
-        task: 'Develop frontend components',
-        assignee: sender,
-        status: 'Pending',
-      })
-    }
-    if (/(?:you\s+are|you're)\s+(?:doing|handling|building)?\s*(?:back\s*end|backend)/i.test(text)) {
-      rawActionItems.push({
-        task: 'Build backend API services',
-        assignee: otherUser,
-        status: 'Pending',
-      })
-    }
-    if (/(?:im|i'm|i\s+am)\s+(?:doing|handling|building)?\s*(?:back\s*end|backend)/i.test(text)) {
-      rawActionItems.push({
-        task: 'Build backend API services',
-        assignee: sender,
-        status: 'Pending',
-      })
-    }
-    if (/(?:you\s+are|you're)\s+(?:doing|handling|building)?\s*(?:front\s*end|frontend)/i.test(text)) {
-      rawActionItems.push({
-        task: 'Develop frontend components',
-        assignee: otherUser,
-        status: 'Pending',
-      })
+    const otherMatch = text.match(
+      /\byou(?:'re|\s+are|\s+will|'ll)\s+(?:be\s+)?(?:doing|handling|building|taking\s+care\s+of|working\s+on)?\s*(.{3,60}?)(?=[.,;!?\n]|$)/i
+    )
+    if (otherMatch) {
+      rawActionItems.push({ task: titleCase(otherMatch[1].trim()), assignee: otherUser, status: 'Pending' })
     }
 
-    // Generic task patterns
-    const selfPatterns = [
-      /(?:i\s+will|i'll|i\s+can|i\s+am\s+going\s+to|i'm\s+going\s+to|i\s+shall|i\s+plan\s+to)\s+([a-zA-Z0-9_\-\s]{4,60}?(?=[.,;!?\n]|$))/gi,
-      /(?:taking\s+care\s+of|handling|building|working\s+on)\s+([a-zA-Z0-9_\-\s]{4,60}?(?=[.,;!?\n]|$))/gi,
-    ]
-
-    for (const pat of selfPatterns) {
-      let match
-      while ((match = pat.exec(text)) !== null) {
-        let taskText = match[1]?.trim()
-        if (taskText && taskText.length > 3) {
-          if (/^be\s+doing\s+/i.test(taskText)) {
-            taskText = taskText.replace(/^be\s+doing\s+/i, 'Develop ')
-          }
-          const cleanTask = taskText.charAt(0).toUpperCase() + taskText.slice(1)
-          rawActionItems.push({
-            task: cleanTask,
-            assignee: sender,
-            status: 'Pending',
-          })
-        }
-      }
-    }
-
-    const otherPatterns = [
-      /(?:^|[.,\n])\s*([A-Z][a-zA-Z0-9_]+)\s+(?:will|to|shall)\s+([a-zA-Z0-9_\-\s]{4,60}?(?=[.,;!?\n]|$))/g,
-      /(?:task|todo|action\s+item)\s*:\s*([a-zA-Z0-9_\-\s]{4,60}?(?=[.,;!?\n]|$))/gi,
-    ]
-
-    for (const pat of otherPatterns) {
-      let match
-      while ((match = pat.exec(text)) !== null) {
-        if (match.length === 3) {
-          const otherPerson = match[1]?.trim()
-          let otherTask = match[2]?.trim()
-          if (otherPerson && otherTask && otherTask.length > 3) {
-            if (/^be\s+doing\s+/i.test(otherTask)) {
-              otherTask = otherTask.replace(/^be\s+doing\s+/i, 'Develop ')
-            }
-            const cleanTask = otherTask.charAt(0).toUpperCase() + otherTask.slice(1)
-            rawActionItems.push({
-              task: cleanTask,
-              assignee: otherPerson,
-              status: 'Pending',
-            })
-          }
-        }
+    // "Name, submit the report"
+    const addressed = text.match(/^([A-Z][a-z]+),\s*(?:please\s+)?([a-z].{3,60}?)(?=[.!?]|$)/)
+    if (addressed) {
+      const target = participants.find((p) => firstNameOf(p) === addressed[1].toLowerCase())
+      if (target) {
+        rawActionItems.push({ task: titleCase(addressed[2].trim()), assignee: target, status: 'Pending' })
       }
     }
   }
 
-  // Deduplicate action items: one distinct task per person per objective
-  const seenActionItems = new Set<string>()
+  const seen = new Set<string>()
   const actionItems: ActionItem[] = []
   for (const item of rawActionItems) {
-    let cleanTask = item.task.trim()
-    if (/^(?:frontend|front\s*end)$/i.test(cleanTask)) {
-      cleanTask = 'Develop frontend components'
-    } else if (/^(?:backend|back\s*end)$/i.test(cleanTask)) {
-      cleanTask = 'Build backend API services'
-    } else if (/^be\s+doing\s+/i.test(cleanTask)) {
-      cleanTask = cleanTask.replace(/^be\s+doing\s+/i, 'Develop ')
-    }
-
-    let assignee = item.assignee.trim()
-    if (assignee.toLowerCase() === 'you') assignee = defaultCurrentUser
-    if (assignee.toLowerCase() === 'partner') assignee = defaultPartner
-
-    const key = `${assignee.toLowerCase()}:${cleanTask.toLowerCase().replace(/[^a-z0-9]/g, '')}`
-    if (!seenActionItems.has(key)) {
-      seenActionItems.add(key)
-      actionItems.push({
-        task: cleanTask,
-        assignee,
-        status: 'Pending',
-      })
-    }
+    const task = item.task.replace(/^Be\s+Doing\s+/i, '').trim()
+    if (!task) continue
+    const key = `${item.assignee.toLowerCase()}:${task.toLowerCase().replace(/[^a-z0-9]/g, '')}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    actionItems.push({ task, assignee: item.assignee, status: 'Pending' })
   }
 
-  const finalParticipants = Array.from(new Set(actionItems.map((a) => a.assignee).concat(participants)))
-  let summary = ''
-  if (deadlines.length > 0 && actionItems.length > 0) {
-    summary = `Team commitments identified: ${actionItems.length} action item(s) and ${deadlines.length} scheduled deadline(s) for ${finalParticipants.join(', ')}.`
-  } else if (actionItems.length > 0) {
-    summary = `Sprint action items recorded for ${finalParticipants.join(', ')}.`
-  } else if (deadlines.length > 0) {
-    summary = `Scheduled deadlines identified for ${deadlines.map((d) => d.title).join(', ')}.`
+  let summary: string
+  if (deadlines.length && actionItems.length) {
+    summary = `${actionItems.length} action item(s) and ${deadlines.length} scheduled event(s) identified.`
+  } else if (actionItems.length) {
+    summary = `${actionItems.length} action item(s) identified.`
+  } else if (deadlines.length) {
+    summary = `Scheduled: ${deadlines.map((d) => d.title).join(', ')}.`
   } else {
-    summary = `Conversation commitments analyzed across team.`
+    summary = 'No events or action items found in this conversation.'
   }
 
-  return {
-    deadlines,
-    actionItems,
-    summary,
-  }
+  return { deadlines, actionItems, summary, engine: 'fallback' }
 }
 
-/**
- * Robust, dynamic synthesis handler with refined prompt engineering and participant resolution.
- */
+/* -------------------------------------------------------------------------- */
+/*  Gemini prompt + schema                                                    */
+/* -------------------------------------------------------------------------- */
+
+function buildSystemPrompt(): string {
+  const now = new Date().toLocaleString('en-US', {
+    timeZone: TZ, weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+  })
+
+  return `You extract events, deadlines and action items from a chat between teammates.
+Current date/time: ${now} (${TZ}). Each message may be prefixed with the time it was sent.
+
+WHAT TO RETURN FOR EACH EVENT
+- title: ONLY the name of the event, as a short noun phrase (1-5 words), Title Case.
+  Never include dates, times, weekdays, names of people, or chat filler.
+  Remove phrases like "remember to", "don't forget", "make sure", "be present at",
+  "we have", "there is an event", "I think". If the message is an instruction about a
+  task ("submit the report"), turn it into the thing itself ("Report Submission").
+  Keep proper names and acronyms exactly as written (e.g. keep an all-caps acronym).
+- date: "Mon D" format, e.g. "Oct 11". Resolve "today", "tonight", "tomorrow", and
+  weekdays relative to the time the message was sent (or the current date if unknown).
+  If both a weekday and a date are given, trust the explicit date.
+- time: "h:mm AM/PM", e.g. "6:00 PM". Empty string if no time was given. If am/pm is
+  missing, infer it from context (an evening event is PM).
+
+LINK CONTEXT ACROSS NEIGHBORING MESSAGES
+The event name and its date/time are often split across two nearby messages, from either
+sender, in either order. Treat them as ONE event and output ONE entry.
+- Name first, date later: "we have the design review" ... "it's on friday at 2" -> "Design Review", the Friday date, 2:00 PM.
+- Date first, name later: "something's happening on 3rd March at 4pm" ... "it's the robotics demo" -> "Robotics Demo", Mar 3, 4:00 PM.
+Only link messages that are clearly about the same thing and sit within a couple of messages
+of each other. Chatter in between ("ok", "cool") does not break the link.
+
+RULES
+- One entry per real event. If an event is mentioned again (reminders), merge into one entry.
+  If its date or time is later changed, use the latest version.
+- Never copy a title from one event onto a different event. If an event has a date but no
+  name can be found anywhere in nearby messages, use "Untitled Event".
+- Only include items that have a date or a time. Ignore vague talk with no schedule.
+- priority: "High" for hard deadlines, submissions, presentations, or anything within 48 hours;
+  "Medium" for other planned events; "Low" for casual/optional ones.
+
+ACTION ITEMS
+- Concrete tasks someone committed to or was asked to do. "assignee" is the person's full
+  name exactly as it appears in the transcript. Resolve "I" to the speaker and "you" to the
+  other person in a two-person chat. status is "Pending" unless the chat says otherwise.
+- task: short imperative phrase, e.g. "Build backend".
+
+SUMMARY: one short sentence.`
+}
+
+const responseSchema = {
+  type: Type.OBJECT,
+  properties: {
+    deadlines: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          title: { type: Type.STRING },
+          date: { type: Type.STRING },
+          time: { type: Type.STRING },
+          priority: { type: Type.STRING, enum: ['High', 'Medium', 'Low'] },
+        },
+        required: ['title', 'date', 'time', 'priority'],
+        propertyOrdering: ['title', 'date', 'time', 'priority'],
+      },
+    },
+    actionItems: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          task: { type: Type.STRING },
+          assignee: { type: Type.STRING },
+          status: { type: Type.STRING, enum: ['Pending', 'In Progress', 'Completed'] },
+        },
+        required: ['task', 'assignee', 'status'],
+        propertyOrdering: ['task', 'assignee', 'status'],
+      },
+    },
+    summary: { type: Type.STRING },
+  },
+  required: ['deadlines', 'actionItems', 'summary'],
+  propertyOrdering: ['deadlines', 'actionItems', 'summary'],
+}
+
+function finalizeDeadlines(raw: any[]): DeadlineItem[] {
+  const out: DeadlineItem[] = []
+  const seen = new Set<string>()
+
+  raw.forEach((d, idx) => {
+    if (!d) return
+    let title = polishTitle(String(d.title || d.name || ''))
+    if (!title || /^(?:event|upcoming event)$/i.test(title)) title = 'Untitled Event'
+
+    const dateRaw = String(d.date || d.due || '').trim()
+    const timeRaw = String(d.time || '').trim()
+    if (!dateRaw && !timeRaw) return
+
+    const date = dateRaw ? normalizeDateStr(dateRaw) : ''
+    const time = timeRaw ? normalizeTimeStr(timeRaw) : undefined
+    const combined = [date, time].filter(Boolean).join(', ')
+
+    const key = `${title.toLowerCase()}|${combined.toLowerCase()}`
+    if (seen.has(key)) return
+    seen.add(key)
+
+    out.push({
+      id: String(d.id || `deadline-${idx + 1}`),
+      title,
+      date: combined,
+      time,
+      priority: (['High', 'Medium', 'Low'].includes(d.priority) ? d.priority : 'High') as DeadlineItem['priority'],
+      source: 'Conversation',
+    })
+  })
+  return out
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Request parsing                                                           */
+/* -------------------------------------------------------------------------- */
+
+function toIso(v: any): string | undefined {
+  if (!v) return undefined
+  const d = new Date(v)
+  return isNaN(d.getTime()) ? undefined : d.toISOString()
+}
+
+function normalizeMessages(raw: any[], me: string, partner: string): ChatMessage[] {
+  const resolve = (s: string) => {
+    const t = s.trim()
+    if (t.toLowerCase() === 'you') return me
+    if (t.toLowerCase() === 'partner') return partner
+    return t
+  }
+
+  return raw.map((m: any) => {
+    if (typeof m === 'string') {
+      const idx = m.indexOf(':')
+      const prefix = idx > 0 ? m.slice(0, idx) : ''
+      if (prefix && /^[A-Za-z .'-]{1,40}$/.test(prefix)) {
+        return { sender: resolve(prefix), text: m.slice(idx + 1).trim() }
+      }
+      return { sender: me, text: m.trim() }
+    }
+    const sender = m.sender || m.senderName || m.senderId || m.name || m.user || me
+    return {
+      sender: resolve(String(sender)),
+      text: String(m.text || m.content || m.message || '').trim(),
+      sentAt: toIso(m.createdAt || m.timestamp || m.sentAt),
+    }
+  })
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Handler                                                                   */
+/* -------------------------------------------------------------------------- */
+
 export async function processSynthesisRequest(request: NextRequest): Promise<NextResponse> {
   try {
-    // 1. Extract request body safely
     let body: any = {}
     try {
       body = await request.json()
     } catch {
-      try {
-        const text = await request.text()
-        if (text && text.trim()) {
-          body = JSON.parse(text)
-        }
-      } catch {
-        body = {}
-      }
+      body = {}
     }
 
-    let messages: ChatMessage[] = []
     const decoded = verifyAuthToken(request)
-    let currentUserName = decoded?.username || 'Garv Dharmapuri'
+    const currentUserName = decoded?.username || 'Garv Dharmapuri'
     let partnerName = 'Ishaan Pande'
 
-    // 2. If req.body.messages is already provided as an array, use it directly
-    if (body && typeof body === 'object' && 'messages' in body) {
-      if (Array.isArray(body.messages)) {
-        if (body.messages.length === 0) {
-          return NextResponse.json(
-            { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
-            { status: 200 }
-          )
-        }
-        messages = body.messages.map((m: any) => {
-          if (typeof m === 'string') {
-            const parts = m.split(':')
-            if (parts.length > 1) {
-              let sender = parts[0].trim()
-              if (sender.toLowerCase() === 'you') sender = currentUserName
-              if (sender.toLowerCase() === 'partner') sender = partnerName
-              return { sender, text: parts.slice(1).join(':').trim() }
-            }
-            return { sender: currentUserName, text: m.trim() }
-          }
-          let sender = m.sender || m.senderName || m.senderId || m.name || m.user || currentUserName
-          if (typeof sender === 'string') {
-            if (sender.toLowerCase() === 'you') sender = currentUserName
-            if (sender.toLowerCase() === 'partner') sender = partnerName
-          }
-          return {
-            sender: String(sender).trim(),
-            text: String(m.text || m.content || m.message || '').trim(),
-          }
-        })
-      }
-    } else if (Array.isArray(body)) {
-      if (body.length === 0) {
-        return NextResponse.json(
-          { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
-          { status: 200 }
-        )
-      }
-      messages = body.map((m: any) => {
-        if (typeof m === 'string') {
-          return { sender: currentUserName, text: m.trim() }
-        }
-        let sender = m.sender || m.senderName || m.senderId || m.name || m.user || currentUserName
-        if (typeof sender === 'string') {
-          if (sender.toLowerCase() === 'you') sender = currentUserName
-          if (sender.toLowerCase() === 'partner') sender = partnerName
-        }
-        return {
-          sender: String(sender).trim(),
-          text: String(m.text || m.content || m.message || '').trim(),
-        }
-      })
-    } else if (body && typeof body === 'object' && 'conversation' in body && Array.isArray(body.conversation)) {
-      if (body.conversation.length === 0) {
-        return NextResponse.json(
-          { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
-          { status: 200 }
-        )
-      }
-      messages = body.conversation.map((m: any) => {
-        if (typeof m === 'string') {
-          return { sender: currentUserName, text: m.trim() }
-        }
-        let sender = m.sender || m.senderName || m.senderId || m.name || m.user || currentUserName
-        if (typeof sender === 'string') {
-          if (sender.toLowerCase() === 'you') sender = currentUserName
-          if (sender.toLowerCase() === 'partner') sender = partnerName
-        }
-        return {
-          sender: String(sender).trim(),
-          text: String(m.text || m.content || m.message || '').trim(),
-        }
-      })
-    }
+    const conversationId: string | undefined = body?.conversationId || body?.roomId || body?.channelId
 
-    // 3. If messages not passed directly, check conversationId
-    const conversationId: string | undefined =
-      body?.conversationId || body?.roomId || body?.channelId
+    const rawList: any[] | null = Array.isArray(body)
+      ? body
+      : Array.isArray(body?.messages)
+        ? body.messages
+        : Array.isArray(body?.conversation)
+          ? body.conversation
+          : null
 
+    let messages: ChatMessage[] = rawList ? normalizeMessages(rawList, currentUserName, partnerName) : []
+
+    // Fall back to the database if messages weren't sent with the request
     if (messages.length === 0 && conversationId) {
       if (conversationId.startsWith('dm-')) {
-        // Direct Messages: Query DirectMessage collection and resolve actual participant names
         const targetUserId = conversationId.replace(/^dm-/, '')
         const currentUserId = decoded?.userId
 
@@ -420,11 +545,8 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
           let rawMessages: any[] = []
 
           if (mongoose.isValidObjectId(targetUserId)) {
-            // Look up partner user name from DB
             const targetUserDoc = await User.findById(targetUserId).select('username')
-            if (targetUserDoc?.username) {
-              partnerName = targetUserDoc.username
-            }
+            if (targetUserDoc?.username) partnerName = targetUserDoc.username
 
             if (currentUserId && mongoose.isValidObjectId(currentUserId) && currentUserId !== targetUserId) {
               rawMessages = await DirectMessage.find({
@@ -439,10 +561,7 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
 
             if (!rawMessages || rawMessages.length === 0) {
               rawMessages = await DirectMessage.find({
-                $or: [
-                  { senderId: targetUserId },
-                  { recipientId: targetUserId },
-                ],
+                $or: [{ senderId: targetUserId }, { recipientId: targetUserId }],
               })
                 .sort({ createdAt: -1 })
                 .limit(50)
@@ -457,6 +576,7 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
               return {
                 sender: isTarget ? partnerName : currentUserName,
                 text: m.text || (m as any).content || '',
+                sentAt: toIso((m as any).createdAt),
               }
             })
           }
@@ -464,7 +584,6 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
           console.warn('Error querying DirectMessage in synthesis:', dmErr)
         }
       } else {
-        // Channel messages: Query Message collection
         try {
           await connectToDatabase()
           const rawChannelMessages = await Message.find({ conversationId })
@@ -475,6 +594,7 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
             messages = rawChannelMessages.reverse().map((m) => ({
               sender: m.sender || currentUserName,
               text: m.content || '',
+              sentAt: toIso((m as any).createdAt),
             }))
           }
         } catch (chanErr) {
@@ -483,9 +603,7 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
       }
     }
 
-    // 4. Validate messages
     const validMessages = messages.filter((m) => m && m.text && m.text.trim().length > 0)
-
     if (validMessages.length === 0) {
       return NextResponse.json(
         { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
@@ -493,181 +611,72 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
       )
     }
 
-    // 5. Construct prompt enforcing all prompt engineering guidelines
-    const transcript = validMessages.map((m) => `${m.sender}: ${m.text}`).join('\n')
-
-    const systemPrompt = `You are a strict data-extraction engine. Your job is to extract events and deadlines from team messages.
-
-EXTRACTION PROTOCOL:
-For each date or time mentioned in the chat, follow these strict isolated steps:
-
-Step 1 - Locate Source Message:
-Find the single, specific message that contains the date/time reference.
-
-Step 2 - Extract Subject From That Message ONLY:
-Look ONLY at the text of that specific message (and any direct reply immediately above/below it confirming the name).
-- If the message says 'theres an even coming up on 11th october 10 am i think of stac', the subject is 'STAC'. (Title: 'STAC Event')
-- If the message says 'hacktoberfest on 13th oct', the subject is 'Hacktoberfest'. (Title: 'Hacktoberfest')
-- If the message says 'submit the Devpost project by 11:30 PM tonight', the subject is 'Devpost Project'. (Title: 'Devpost Submission')
-- If the message says 'name of this event is abc', the subject is 'abc'. (Title: 'abc')
-
-NEGATIVE CONSTRAINTS (STRICT):
-- ABSOLUTELY NEVER reuse a title from an earlier message for a later date.
-- It is a CRITICAL ERROR if two events on different dates share the same title unless both messages explicitly write out that identical name.
-- If a message mentions a date with no clear name at all, use 'Team Event' or 'Sprint Sync'. NEVER use 'abc'.
-
-OUTPUT SCHEMA:
-Return strictly valid JSON:
-{
-  "deadlines": [
-    {
-      "id": "unique-id",
-      "title": "string",
-      "date": "string",
-      "time": "string",
-      "priority": "High" | "Medium" | "Low",
-      "source": "Conversation"
-    }
-  ],
-  "actionItems": [...],
-  "summary": "string"
-}`
-
-    const prompt = `${systemPrompt}
-
-Conversation Transcript:
-${transcript}`
+    // ---- Gemini ----
+    const transcript = validMessages
+      .map((m) => {
+        const stamp = formatStamp(m.sentAt)
+        return `${stamp ? `[${stamp}] ` : ''}${m.sender}: ${m.text}`
+      })
+      .join('\n')
 
     const apiKey = process.env.GEMINI_API_KEY
-    if (apiKey) {
+    if (!apiKey) {
+      console.error('[synthesis] GEMINI_API_KEY is not set in this environment. Using fallback parser.')
+    } else {
       try {
         const ai = new GoogleGenAI({ apiKey })
         const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: prompt,
+          model: GEMINI_MODEL,
+          contents: transcript,
           config: {
-            systemInstruction: systemPrompt,
+            systemInstruction: buildSystemPrompt(),
             responseMimeType: 'application/json',
+            responseSchema,
+            temperature: 0,
+            thinkingConfig: { thinkingBudget: 1024 },
           },
         })
 
-        const rawText = response.text || ''
-        const cleaned = cleanJsonResponse(rawText)
-        const parsed = JSON.parse(cleaned)
+        const parsed = JSON.parse(cleanJsonResponse(response.text || ''))
 
-        if (parsed && typeof parsed === 'object') {
-          const deadlines: DeadlineItem[] = Array.isArray(parsed.deadlines)
-            ? parsed.deadlines
-                .filter((d: any) => d && (d.title || d.name))
-                .map((d: any, idx: number) => {
-                  let title = String(d.title || d.name).trim()
-                  title = title.replace(/^(?:yes|no|and|also|so|the|our|we\s+have|an|a|okay\s+look\s+there\s+is\s+an?\s+event|look\s+there\s+is\s+an?\s+event|there\s+is\s+an?\s+event)\s+/i, '').trim()
-                  let dateStr = String(d.date || d.due || '').trim()
-                  const timeStr = String(d.time || '').trim()
+        const deadlines = finalizeDeadlines(Array.isArray(parsed?.deadlines) ? parsed.deadlines : [])
 
-                  // Strict negative rule: If title is 'abc' on Oct 11 or later date, strictly prevent reuse
-                  if (title.toLowerCase() === 'abc' && (/\b11(?:th)?\s*oct|\boct(?:ober)?\s*11\b/i.test(dateStr) || /\b10:00\s*am\b/i.test(dateStr))) {
-                    title = 'STAC Event'
-                  }
-                  if (title.toLowerCase() === 'abc' && (/\b13(?:th)?\s*oct|\boct(?:ober)?\s*13\b/i.test(dateStr))) {
-                    title = 'Hacktoberfest'
-                  }
-                  if (title.toLowerCase() === 'abc' && (/\b11:30\s*pm\b/i.test(dateStr) || /\bdevpost\b/i.test(dateStr))) {
-                    title = 'Devpost Submission'
-                  }
-
-                  if (title.toLowerCase() === 'event' || title.toLowerCase() === 'upcoming event' || !title) {
-                    title = 'Team Event'
-                  }
-
-                  if (timeStr && !dateStr.includes(timeStr)) {
-                    dateStr = `${dateStr}, ${timeStr}`
-                  }
-
-                  return {
-                    id: String(d.id || `deadline-${idx + 1}`),
-                    title,
-                    date: dateStr,
-                    time: timeStr || undefined,
-                    priority: (['High', 'Medium', 'Low'].includes(d.priority) ? d.priority : 'High') as 'High' | 'Medium' | 'Low',
-                    source: String(d.source || 'Conversation'),
-                  }
-                })
-            : []
-
-          const rawActionItems: ActionItem[] = Array.isArray(parsed.actionItems)
-            ? parsed.actionItems
-                .filter((a: any) => a && (a.task || a.title))
-                .map((a: any) => {
-                  let task = String(a.task || a.title).trim()
-                  let assignee = String(a.assignee || 'Unassigned').trim()
-
-                  if (assignee.toLowerCase() === 'you') assignee = currentUserName
-                  if (assignee.toLowerCase() === 'partner') assignee = partnerName
-
-                  if (/^be\s+doing\s+/i.test(task)) {
-                    task = task.replace(/^be\s+doing\s+/i, 'Develop ')
-                  }
-                  if (/^(?:frontend|front\s*end)$/i.test(task)) {
-                    task = 'Develop frontend components'
-                  } else if (/^(?:backend|back\s*end)$/i.test(task)) {
-                    task = 'Build backend API services'
-                  }
-
-                  return {
-                    task,
-                    assignee,
-                    status: (['Pending', 'In Progress', 'Completed'].includes(a.status) ? a.status : 'Pending') as 'Pending' | 'In Progress' | 'Completed',
-                  }
-                })
-            : []
-
-          // Deduplicate: Ensure only one distinct task exists per person per objective
-          const seenActionItems = new Set<string>()
-          const actionItems: ActionItem[] = []
-          for (const item of rawActionItems) {
-            const normKey = `${item.assignee.toLowerCase()}:${item.task.toLowerCase().replace(/[^a-z0-9]/g, '')}`
-            if (!seenActionItems.has(normKey)) {
-              seenActionItems.add(normKey)
-              actionItems.push(item)
-            }
-          }
-
-          if (actionItems.length === 0) {
-            const fallbackSynthesis = extractDynamicSynthesis(validMessages, currentUserName, partnerName)
-            actionItems.push(...fallbackSynthesis.actionItems)
-          }
-
-          const summary =
-            typeof parsed.summary === 'string' && parsed.summary.trim()
-              ? parsed.summary.trim()
-              : `Sprint commitments analyzed across ${validMessages.length} message(s).`
-
-          return NextResponse.json(
-            {
-              deadlines,
-              actionItems,
-              summary,
-            },
-            { status: 200 }
-          )
+        const seen = new Set<string>()
+        const actionItems: ActionItem[] = []
+        for (const a of Array.isArray(parsed?.actionItems) ? parsed.actionItems : []) {
+          if (!a || !(a.task || a.title)) continue
+          let assignee = String(a.assignee || 'Unassigned').trim()
+          if (assignee.toLowerCase() === 'you') assignee = currentUserName
+          if (assignee.toLowerCase() === 'partner') assignee = partnerName
+          const task = String(a.task || a.title).trim()
+          const key = `${assignee.toLowerCase()}:${task.toLowerCase().replace(/[^a-z0-9]/g, '')}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          actionItems.push({
+            task,
+            assignee,
+            status: (['Pending', 'In Progress', 'Completed'].includes(a.status) ? a.status : 'Pending') as ActionItem['status'],
+          })
         }
+
+        const summary =
+          typeof parsed?.summary === 'string' && parsed.summary.trim()
+            ? parsed.summary.trim()
+            : `Analyzed ${validMessages.length} message(s).`
+
+        return NextResponse.json({ deadlines, actionItems, summary, engine: 'gemini' }, { status: 200 })
       } catch (geminiError: unknown) {
-        console.warn('Gemini 2.5 Flash call failed, using dynamic parser:', geminiError)
+        // Log the real reason so it shows up in Vercel logs
+        const err = geminiError as any
+        console.error('[synthesis] Gemini call failed, using fallback parser:', err?.status, err?.message || err)
       }
     }
 
-    // 6. Dynamic fallback parsing (zero hardcoded mock strings)
-    const dynamicResult = extractDynamicSynthesis(validMessages, currentUserName, partnerName)
-    return NextResponse.json(dynamicResult, { status: 200 })
+    return NextResponse.json(extractDynamicSynthesis(validMessages, currentUserName, partnerName), { status: 200 })
   } catch (error: unknown) {
     console.error('Safe catch-all in processSynthesisRequest:', error)
     return NextResponse.json(
-      {
-        deadlines: [],
-        actionItems: [],
-        summary: 'No messages to synthesize.',
-      },
+      { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
       { status: 200 }
     )
   }
