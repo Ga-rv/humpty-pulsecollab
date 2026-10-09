@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { connectToDatabase } from '@/lib/mongodb'
 import { DirectMessage } from '@/models/DirectMessage'
+import { Conversation } from '@/models/Conversation'
 import { verifyAuthToken } from '@/lib/auth'
 import { triggerPusherEvent } from '@/lib/pusher-server'
 
@@ -67,6 +68,21 @@ export async function POST(request: NextRequest) {
       recipientId,
       text: text.trim(),
     })
+
+    // Ensure Conversation thread is recorded in MongoDB
+    await Conversation.updateOne(
+      {
+        type: 'direct',
+        members: { $all: [decoded.userId, recipientId] },
+      },
+      {
+        $setOnInsert: {
+          type: 'direct',
+          members: [decoded.userId, recipientId],
+        },
+      },
+      { upsert: true }
+    ).catch(() => {})
 
     const payload = {
       id: directMessage._id.toString(),

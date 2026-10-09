@@ -146,7 +146,7 @@ export function Sidebar({
               </p>
             ) : registeredUsers.length === 0 ? (
               <p className="px-2 py-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-                No registered peers found. Click + New Chat to connect.
+                No active conversations yet. Click + New Chat to start a thread.
               </p>
             ) : (
               <ul className="flex flex-col gap-0.5">

@@ -53,7 +53,8 @@ export function Workspace() {
   const [activeRoomId, setActiveRoomId] = useState(MAIN_ROOM_ID)
   const [messages, setMessages] = useState<Record<string, Message[]>>({})
   const [unread, setUnread] = useState<Record<string, number>>({})
-  const [registeredUsers, setRegisteredUsers] = useState<ChatUser[]>([])
+  const [conversationUsers, setConversationUsers] = useState<ChatUser[]>([])
+  const [allUsers, setAllUsers] = useState<ChatUser[]>([])
   const [typing, setTyping] = useState<{ roomId: string; userId: string } | null>(null)
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -81,10 +82,10 @@ export function Workspace() {
     activeRoomRef.current = activeRoomId
   }, [activeRoomId])
 
-  // Fetch registered users for 1-to-1 DMs
-  const fetchRegisteredUsers = useCallback(() => {
+  // Fetch users with existing active conversations (for sidebar)
+  const fetchConversationUsers = useCallback(() => {
     if (!session?.token || session?.isGuest || session?.role === 'Guest') {
-      setRegisteredUsers([])
+      setConversationUsers([])
       return
     }
     const headers: Record<string, string> = {
@@ -94,15 +95,35 @@ export function Workspace() {
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data?.users && Array.isArray(data.users)) {
-          setRegisteredUsers(data.users)
+          setConversationUsers(data.users)
         }
       })
-      .catch((err) => console.warn('Failed to fetch registered users:', err))
+      .catch((err) => console.warn('Failed to fetch conversation users:', err))
+  }, [session?.token, session?.isGuest, session?.role])
+
+  // Fetch all registered users in database (for New Chat modal)
+  const fetchAllUsers = useCallback(() => {
+    if (!session?.token || session?.isGuest || session?.role === 'Guest') {
+      setAllUsers([])
+      return
+    }
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${session.token}`,
+    }
+    fetch('/api/users?all=true', { headers })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.users && Array.isArray(data.users)) {
+          setAllUsers(data.users)
+        }
+      })
+      .catch((err) => console.warn('Failed to fetch all users:', err))
   }, [session?.token, session?.isGuest, session?.role])
 
   useEffect(() => {
-    fetchRegisteredUsers()
-  }, [fetchRegisteredUsers])
+    fetchConversationUsers()
+    fetchAllUsers()
+  }, [fetchConversationUsers, fetchAllUsers])
 
   // Initialize Socket.IO connection
   useEffect(() => {
@@ -245,6 +266,9 @@ export function Workspace() {
     const handlePersonalDm = (data: Record<string, unknown>) => {
       const senderId = (data.senderId || data.authorId) as string
       if (!senderId || senderId === session.userId) return
+
+      // Ensure new DM conversation appears in the sidebar
+      fetchConversationUsers()
 
       const roomKey = `dm-${senderId}`
       const incoming: Message = {
@@ -738,7 +762,8 @@ export function Workspace() {
     setDrawerOpen(false)
 
     setSession(GUEST_SESSION)
-    setRegisteredUsers([])
+    setConversationUsers([])
+    setAllUsers([])
 
     if (socketRef.current && socketRef.current.connected) {
       socketRef.current.emit('join_room', MAIN_ROOM_ID)
@@ -748,9 +773,36 @@ export function Workspace() {
   const handlePickPeer = useCallback(
     (userId: string) => {
       setNewChatOpen(false)
+
+      // 1. Locate selected user from allUsers or conversationUsers
+      const chosenUser =
+        allUsers.find((u) => u.id === userId || u._id === userId) ||
+        conversationUsers.find((u) => u.id === userId || u._id === userId)
+
+      // 2. Dynamically add to sidebar conversation list immediately
+      if (chosenUser) {
+        setConversationUsers((prev) => {
+          if (prev.some((u) => u.id === userId || u._id === userId)) return prev
+          return [...prev, chosenUser]
+        })
+      }
+
+      // 3. Persist conversation in MongoDB permanently
+      if (session?.token) {
+        fetch('/api/users', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session.token}`,
+          },
+          body: JSON.stringify({ targetUserId: userId }),
+        }).catch((err) => console.warn('Failed to persist conversation:', err))
+      }
+
+      // 4. Open the DM thread
       selectRoom(`dm-${userId}`)
     },
-    [selectRoom],
+    [allUsers, conversationUsers, selectRoom, session?.token],
   )
 
   const handleAddContext = useCallback(
@@ -776,9 +828,9 @@ export function Workspace() {
   let room: ReturnType<typeof getRoom>
   if (activeRoomId.startsWith('dm-')) {
     const targetUserId = activeRoomId.replace(/^dm-/, '')
-    const matchedUser = registeredUsers.find(
-      (u) => u.id === targetUserId || u._id === targetUserId
-    )
+    const matchedUser =
+      conversationUsers.find((u) => u.id === targetUserId || u._id === targetUserId) ||
+      allUsers.find((u) => u.id === targetUserId || u._id === targetUserId)
     const partnerName = matchedUser?.name || matchedUser?.username || 'Teammate'
     room = {
       id: activeRoomId,
@@ -802,13 +854,14 @@ export function Workspace() {
         open={sidebarOpen}
         activeRoomId={activeRoomId}
         unread={unread}
-        registeredUsers={registeredUsers}
+        registeredUsers={conversationUsers}
         session={session}
         onSelectRoom={selectRoom}
         onNewChat={() => {
           if (!session?.token) {
             setAuthOpen(true)
           } else {
+            fetchAllUsers()
             setNewChatOpen(true)
           }
         }}
@@ -862,8 +915,8 @@ export function Workspace() {
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} onSubmit={handleAuth} />
       <NewChatModal
         open={newChatOpen}
-        users={registeredUsers}
-        existingUserIds={registeredUsers.map((u) => u.id)}
+        users={allUsers}
+        existingUserIds={conversationUsers.map((u) => u.id)}
         onClose={() => setNewChatOpen(false)}
         onPick={handlePickPeer}
       />
