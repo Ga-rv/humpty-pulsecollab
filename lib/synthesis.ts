@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { GoogleGenAI } from '@google/genai'
+import mongoose from 'mongoose'
 import { connectToDatabase } from '@/lib/mongodb'
 import { Message } from '@/models/Message'
+import { DirectMessage } from '@/models/DirectMessage'
+import { verifyAuthToken } from '@/lib/auth'
 
 export interface DeadlineItem {
   title: string
@@ -28,12 +31,10 @@ export interface SynthesisResponse {
   unresolved?: string[]
 }
 
-interface NormalizedMessage {
-  senderName: string
-  senderId: string
+interface ChatMessage {
+  sender: string
   text: string
 }
-
 
 function cleanJsonResponse(raw: string): string {
   let cleaned = raw.trim()
@@ -63,7 +64,6 @@ function normalizeDateStr(rawDate: string): string {
     dec: 'Dec', december: 'Dec',
   }
 
-  // e.g. "11th October" or "11 October"
   const m1 = rawDate.match(/(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]+)/i)
   if (m1) {
     const monthKey = m1[2].toLowerCase()
@@ -71,7 +71,6 @@ function normalizeDateStr(rawDate: string): string {
     return `${monthName} ${m1[1]}`
   }
 
-  // e.g. "October 11th" or "Oct 11"
   const m2 = rawDate.match(/([a-zA-Z]+)\s+(\d{1,2})(?:st|nd|rd|th)?/i)
   if (m2) {
     const monthKey = m2[1].toLowerCase()
@@ -95,14 +94,14 @@ function normalizeTimeStr(rawTime: string): string {
 
 /**
  * Pure dynamic extractor used when Gemini API key is missing or calls throw.
- * Inspects the actual conversation messages and NEVER returns hardcoded strings.
+ * Inspects the actual conversation messages without hardcoded mock strings.
  */
-export function extractDynamicSynthesis(messages: NormalizedMessage[]): SynthesisResponse {
+export function extractDynamicSynthesis(messages: ChatMessage[]): SynthesisResponse {
   const deadlines: DeadlineItem[] = []
   const actionItems: ActionItem[] = []
 
   for (const m of messages) {
-    const sender = m.senderName || m.senderId || 'Team Member'
+    const sender = m.sender || 'Participant'
     const text = m.text
 
     // 1. Detect Deadlines & Events
@@ -121,7 +120,7 @@ export function extractDynamicSynthesis(messages: NormalizedMessage[]): Synthesi
         combinedDate = `${formattedDate}, ${normalizeTimeStr(timeMatch[1])}`
       }
 
-      let title = 'Upcoming Event'
+      let title = 'Event'
       if (/\bevent\s+(?:on|at|for|by|scheduled|in)\b/i.test(text)) {
         title = 'Event'
       } else {
@@ -146,7 +145,7 @@ export function extractDynamicSynthesis(messages: NormalizedMessage[]): Synthesi
       })
     }
 
-    // 2. Detect Action Items for all parties
+    // 2. Detect Action Items
     const selfPatterns = [
       /(?:i\s+will|i'll|i\s+can|i\s+am\s+going\s+to|i'm\s+going\s+to|i\s+shall|i\s+plan\s+to)\s+([a-zA-Z0-9_\-\s]{4,60}?(?=[.,;!?\n]|$))/gi,
       /(?:will\s+be\s+doing|doing)\s+([a-zA-Z0-9_\-\s]{4,60}?(?=[.,;!?\n]|$))/gi,
@@ -208,8 +207,7 @@ export function extractDynamicSynthesis(messages: NormalizedMessage[]): Synthesi
     }
   }
 
-  // 3. Dynamic Summary
-  const participants = Array.from(new Set(messages.map((m) => m.senderName || m.senderId).filter(Boolean)))
+  const participants = Array.from(new Set(messages.map((m) => m.sender).filter(Boolean)))
   let summary = ''
   if (deadlines.length > 0 && actionItems.length > 0) {
     summary = `Team commitments identified: ${actionItems.length} task(s) and ${deadlines.length} scheduled deadline(s) across participants (${participants.join(', ')}).`
@@ -218,7 +216,7 @@ export function extractDynamicSynthesis(messages: NormalizedMessage[]): Synthesi
   } else if (deadlines.length > 0) {
     summary = `Deadlines identified for upcoming sprint milestone(s).`
   } else {
-    summary = `Conversation reviewed across ${participants.length > 0 ? participants.join(', ') : 'team'}.`
+    summary = `Conversation reviewed across ${participants.length > 0 ? participants.join(', ') : 'participants'}.`
   }
 
   return {
@@ -248,17 +246,31 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
       }
     }
 
-    // 2. Dynamic message array resolution
-    let rawMessages: any[] = []
+    let messages: ChatMessage[] = []
 
+    // 2. If req.body.messages is already provided as an array, use it directly
     if (body && typeof body === 'object' && 'messages' in body) {
-      if (!Array.isArray(body.messages) || body.messages.length === 0) {
-        return NextResponse.json(
-          { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
-          { status: 200 }
-        )
+      if (Array.isArray(body.messages)) {
+        if (body.messages.length === 0) {
+          return NextResponse.json(
+            { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
+            { status: 200 }
+          )
+        }
+        messages = body.messages.map((m: any) => {
+          if (typeof m === 'string') {
+            const parts = m.split(':')
+            if (parts.length > 1) {
+              return { sender: parts[0].trim(), text: parts.slice(1).join(':').trim() }
+            }
+            return { sender: 'User', text: m.trim() }
+          }
+          return {
+            sender: m.sender || m.senderName || m.senderId || m.name || m.user || 'User',
+            text: String(m.text || m.content || m.message || '').trim(),
+          }
+        })
       }
-      rawMessages = body.messages
     } else if (Array.isArray(body)) {
       if (body.length === 0) {
         return NextResponse.json(
@@ -266,110 +278,130 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
           { status: 200 }
         )
       }
-      rawMessages = body
-    } else if (body && typeof body === 'object' && 'conversation' in body) {
-      if (!Array.isArray(body.conversation) || body.conversation.length === 0) {
-        return NextResponse.json(
-          { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
-          { status: 200 }
-        )
-      }
-      rawMessages = body.conversation
-    } else if (body?.conversationId) {
-      // Look up messages for conversationId from DB
-      try {
-        await connectToDatabase()
-        const dbMsgs = await Message.find({ conversationId: body.conversationId }).sort({ createdAt: 1 })
-        if (dbMsgs && dbMsgs.length > 0) {
-          rawMessages = dbMsgs.map((m) => ({
-            senderName: m.sender,
-            senderId: m.sender,
-            text: m.content,
-          }))
+      messages = body.map((m: any) => {
+        if (typeof m === 'string') {
+          return { sender: 'User', text: m.trim() }
         }
-      } catch (err) {
-        console.warn('DB message lookup skipped/failed:', err)
-      }
-
-      if (rawMessages.length === 0) {
+        return {
+          sender: m.sender || m.senderName || m.senderId || m.name || m.user || 'User',
+          text: String(m.text || m.content || m.message || '').trim(),
+        }
+      })
+    } else if (body && typeof body === 'object' && 'conversation' in body && Array.isArray(body.conversation)) {
+      if (body.conversation.length === 0) {
         return NextResponse.json(
           { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
           { status: 200 }
         )
       }
-    } else {
-      return NextResponse.json(
-        { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
-        { status: 200 }
-      )
+      messages = body.conversation.map((m: any) => {
+        if (typeof m === 'string') {
+          return { sender: 'User', text: m.trim() }
+        }
+        return {
+          sender: m.sender || m.senderName || m.senderId || m.name || m.user || 'User',
+          text: String(m.text || m.content || m.message || '').trim(),
+        }
+      })
     }
 
-    // 3. Normalize messages
-    const formattedMessages: NormalizedMessage[] = rawMessages
-      .map((m) => {
-        if (typeof m === 'string') {
-          const parts = m.split(':')
-          if (parts.length > 1) {
-            return {
-              senderName: parts[0].trim(),
-              senderId: parts[0].trim(),
-              text: parts.slice(1).join(':').trim(),
+    // 3. If messages not passed directly, check conversationId
+    const conversationId: string | undefined =
+      body?.conversationId || body?.roomId || body?.channelId
+
+    if (messages.length === 0 && conversationId) {
+      if (conversationId.startsWith('dm-')) {
+        // Direct Messages: Query DirectMessage collection
+        const targetUserId = conversationId.replace(/^dm-/, '')
+        const decoded = verifyAuthToken(request)
+        const currentUserId = decoded?.userId
+
+        try {
+          await connectToDatabase()
+          let rawMessages: any[] = []
+
+          if (mongoose.isValidObjectId(targetUserId)) {
+            if (currentUserId && mongoose.isValidObjectId(currentUserId) && currentUserId !== targetUserId) {
+              rawMessages = await DirectMessage.find({
+                $or: [
+                  { senderId: currentUserId, recipientId: targetUserId },
+                  { senderId: targetUserId, recipientId: currentUserId },
+                ],
+              })
+                .sort({ createdAt: -1 })
+                .limit(50)
+            }
+
+            if (!rawMessages || rawMessages.length === 0) {
+              rawMessages = await DirectMessage.find({
+                $or: [
+                  { senderId: targetUserId },
+                  { recipientId: targetUserId },
+                ],
+              })
+                .sort({ createdAt: -1 })
+                .limit(50)
             }
           }
-          return {
-            senderName: 'User',
-            senderId: 'User',
-            text: m.trim(),
-          }
-        }
-        if (m && typeof m === 'object') {
-          const senderName = m.senderName || m.name || m.user || m.sender || ''
-          const senderId = m.senderId || m.authorId || senderName || 'User'
-          const text = m.text || m.content || m.message || ''
-          return {
-            senderName: senderName || senderId,
-            senderId,
-            text: String(text).trim(),
-          }
-        }
-        return null
-      })
-      .filter((m): m is NormalizedMessage => Boolean(m && m.text.length > 0))
 
-    if (formattedMessages.length === 0) {
+          if (rawMessages && rawMessages.length > 0) {
+            messages = rawMessages.reverse().map((m) => ({
+              sender: m.senderId?.toString() === targetUserId ? 'Partner' : 'You',
+              text: m.text || (m as any).content || '',
+            }))
+          }
+        } catch (dmErr) {
+          console.warn('Error querying DirectMessage in synthesis:', dmErr)
+        }
+      } else {
+        // Channel messages: Query Message collection
+        try {
+          await connectToDatabase()
+          const rawChannelMessages = await Message.find({ conversationId })
+            .sort({ createdAt: -1 })
+            .limit(50)
+
+          if (rawChannelMessages && rawChannelMessages.length > 0) {
+            messages = rawChannelMessages.reverse().map((m) => ({
+              sender: m.sender || 'User',
+              text: m.content || '',
+            }))
+          }
+        } catch (chanErr) {
+          console.warn('Error querying Message in synthesis:', chanErr)
+        }
+      }
+    }
+
+    // 4. Validate messages
+    const validMessages = messages.filter((m) => m && m.text && m.text.trim().length > 0)
+
+    if (validMessages.length === 0) {
       return NextResponse.json(
         { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
         { status: 200 }
       )
     }
 
-    // 4. Construct prompt dynamically with conversation text
-    const conversationText = formattedMessages
-      .map((m) => `${m.senderName || m.senderId}:${m.text}`)
-      .join('\n')
+    // 5. Call Gemini 2.5 Flash
+    const transcript = validMessages.map((m) => `${m.sender}: ${m.text}`).join('\n')
 
-    const prompt = `You are an AI sprint manager. Parse the following conversation and extract all deadlines and action items for every person mentioned.
+    const prompt = `You are an AI sprint manager. Analyze this conversation transcript and extract all upcoming deadlines, events, and action items for each participant.
 
-Conversation:
-${conversationText}
+Transcript:
+${transcript}
 
-Return a valid JSON object matching this schema:
+Return strictly valid JSON with this schema (no markdown fences, no extra text):
 {
   "deadlines": [
-    { "title": "string (event or deadline name)", "date": "string (e.g., Oct 11, 10:00 AM)", "priority": "High | Medium | Low" }
+    { "title": "string", "date": "string", "priority": "High|Medium|Low" }
   ],
   "actionItems": [
-    { "task": "string (clear action verb + scope)", "assignee": "string (name of person responsible)", "status": "Pending" }
+    { "task": "string", "assignee": "string", "status": "Pending" }
   ],
-  "summary": "string (1-2 sentence overview of commitments)"
-}
+  "summary": "string"
+}`
 
-Rules:
-- Detect all events (e.g. if someone mentions an event on 11th October 10 AM, add it to deadlines).
-- Extract action items for ALL parties involved (e.g. if one does frontend and another does backend, create separate tasks for both assignees).
-- Return raw JSON only, no markdown backticks or commentary.`
-
-    // 5. Call official Google Gen AI SDK with gemini-2.5-flash
     const apiKey = process.env.GEMINI_API_KEY
     if (apiKey) {
       try {
@@ -410,7 +442,7 @@ Rules:
           const summary =
             typeof parsed.summary === 'string' && parsed.summary.trim()
               ? parsed.summary.trim()
-              : `Sprint commitments analyzed across ${formattedMessages.length} message(s).`
+              : `Sprint commitments analyzed across ${validMessages.length} message(s).`
 
           return NextResponse.json(
             {
@@ -427,7 +459,7 @@ Rules:
     }
 
     // 6. Dynamic fallback parsing (zero hardcoded strings)
-    const dynamicResult = extractDynamicSynthesis(formattedMessages)
+    const dynamicResult = extractDynamicSynthesis(validMessages)
     return NextResponse.json(dynamicResult, { status: 200 })
   } catch (error: unknown) {
     console.error('Safe catch-all in processSynthesisRequest:', error)

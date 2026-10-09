@@ -438,9 +438,14 @@ export function Workspace() {
     const scopeParam = scope === 'last-50' ? 'last50' : 'today'
 
     try {
-      const res = await fetch('/api/pulse/synthesize', {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (session?.token) {
+        headers['Authorization'] = `Bearer ${session.token}`
+      }
+
+      const res = await fetch('/api/synthesize', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           conversationId: activeRoomId,
           scope: scopeParam,
@@ -465,7 +470,7 @@ export function Workspace() {
     } finally {
       setScanning(false)
     }
-  }, [activeRoomId, scope])
+  }, [activeRoomId, scope, session?.token])
 
   const handleConvert = useCallback(
     async (key: string, title: string, owner: string, deadline?: string) => {
