@@ -47,7 +47,7 @@ function useSyncedLabel(syncedAt: number | null) {
 function ScanningSkeleton() {
   return (
     <div className="flex flex-col gap-2.5" role="status" aria-live="polite">
-      <p className="font-mono text-[11px] text-pulse">Synthesizing deadlines, actions and open questions via Gemini 1.5 Flash...</p>
+      <p className="font-mono text-[11px] text-pulse">Synthesizing deadlines, actions and open questions via Gemini 3.5 Flash...</p>
       {[0, 1, 2].map((item) => (
         <div key={item} className="flex animate-pulse flex-col gap-2 rounded-lg border border-border bg-panel-2 p-3">
           <div className="h-3 w-3/4 rounded bg-border" />
