@@ -52,6 +52,9 @@ export function MessageItem({
   highlighted,
 }: MessageItemProps) {
   if (message.kind === 'context') {
+    if (message.roomId?.startsWith('dm-')) {
+      return null
+    }
     return (
       <li className="flex justify-center py-1">
         <p className="max-w-[90%] rounded-full border border-border bg-panel px-3 py-1 text-center font-mono text-[11px] text-muted-foreground">

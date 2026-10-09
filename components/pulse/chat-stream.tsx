@@ -51,10 +51,23 @@ export function ChatStream({
   const feedRef = useRef<HTMLDivElement>(null)
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  const isGuest = !session || Boolean(session.isGuest) || session.role === 'Guest' || !session.token
+  const currentUserName = session?.name || 'Guest User'
+  const currentUserInitials = session?.initials || 'GU'
+
+  const typingUser = typingUserId ? (USERS[typingUserId] || { name: typingUserId }) : null
+  const isDirectMessage = room.type === 'dm' || room.id.startsWith('dm-')
+  const isChannel = room.type === 'channel' && !isDirectMessage
+  const dmUser = room.userId ? USERS[room.userId] : null
+
+  const visibleMessages = isDirectMessage
+    ? messages.filter((m) => m.kind !== 'context')
+    : messages
+
   useEffect(() => {
     const feed = feedRef.current
     if (feed) feed.scrollTop = feed.scrollHeight
-  }, [messages.length, room.id, typingUserId])
+  }, [visibleMessages.length, room.id, typingUserId])
 
   const handleInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     setDraft(event.target.value)
@@ -76,14 +89,6 @@ export function ChatStream({
     onSend(text)
     setDraft('')
   }
-
-  const isGuest = !session || Boolean(session.isGuest) || session.role === 'Guest' || !session.token
-  const currentUserName = session?.name || 'Guest User'
-  const currentUserInitials = session?.initials || 'GU'
-
-  const typingUser = typingUserId ? (USERS[typingUserId] || { name: typingUserId }) : null
-  const isChannel = room.type === 'channel'
-  const dmUser = room.userId ? USERS[room.userId] : null
 
   return (
     <section aria-label={`Conversation: ${room.name}`} className="flex min-w-0 flex-1 flex-col bg-background">
@@ -107,9 +112,11 @@ export function ChatStream({
             <span className="truncate">{room.name}</span>
           </h1>
 
-          <span className="hidden min-w-0 truncate rounded-full border border-border bg-panel-2 px-2.5 py-0.5 font-mono text-[11px] text-muted-foreground sm:inline-block">
-            {room.context}
-          </span>
+          {isChannel && (
+            <span className="hidden min-w-0 truncate rounded-full border border-border bg-panel-2 px-2.5 py-0.5 font-mono text-[11px] text-muted-foreground sm:inline-block">
+              {room.context}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-3 shrink-0 ml-auto">
@@ -123,14 +130,16 @@ export function ChatStream({
             />
             {isChannel ? `${room.onlineCount} online` : 'Online'}
           </span>
-          <button
-            type="button"
-            onClick={onAddContext}
-            className="inline-flex h-8 items-center gap-1 rounded-lg border border-border bg-background px-2.5 text-xs font-medium text-foreground transition-colors hover:border-muted-foreground/50"
-          >
-            <Plus className="size-3.5" aria-hidden="true" />
-            Add Context
-          </button>
+          {isChannel && (
+            <button
+              type="button"
+              onClick={onAddContext}
+              className="inline-flex h-8 items-center gap-1 rounded-lg border border-border bg-background px-2.5 text-xs font-medium text-foreground transition-colors hover:border-muted-foreground/50"
+            >
+              <Plus className="size-3.5" aria-hidden="true" />
+              Add Context
+            </button>
+          )}
           <button
             type="button"
             onClick={onToggleDrawer}
@@ -165,7 +174,7 @@ export function ChatStream({
                 Sign in with a team account to access sprint channels and private direct messages.
               </p>
             </div>
-          ) : messages.length === 0 ? (
+          ) : visibleMessages.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
               <div className="flex size-10 items-center justify-center rounded-full border border-border bg-panel-2">
                 {isChannel ? (
@@ -190,7 +199,10 @@ export function ChatStream({
               aria-label="Messages"
               className="flex flex-col gap-2"
             >
-              {messages.map((message) => {
+              {visibleMessages.map((message) => {
+                if (isDirectMessage && message.kind === 'context') {
+                  return null
+                }
                 const outgoing =
                   message.authorId === (session?.userId || '') ||
                   message.authorId === currentUserName ||

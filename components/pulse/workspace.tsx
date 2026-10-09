@@ -620,6 +620,10 @@ export function Workspace() {
 
   const handleAddContext = useCallback(
     (text: string) => {
+      if (activeRoomId.startsWith('dm-')) {
+        setContextOpen(false)
+        return
+      }
       appendMessage({
         id: nextId('ctx'),
         roomId: activeRoomId,
@@ -691,7 +695,11 @@ export function Workspace() {
           onScopeChange={setScope}
           onSend={handleSend}
           onSynthesize={handleSynthesize}
-          onAddContext={() => setContextOpen(true)}
+          onAddContext={() => {
+            if (!activeRoomId.startsWith('dm-')) {
+              setContextOpen(true)
+            }
+          }}
           onOpenSidebar={() => setSidebarOpen(true)}
           drawerOpen={drawerOpen}
           onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
@@ -725,7 +733,7 @@ export function Workspace() {
         onPick={handlePickPeer}
       />
       <AddContextModal
-        open={contextOpen}
+        open={contextOpen && !activeRoomId.startsWith('dm-')}
         roomName={room.name}
         onClose={() => setContextOpen(false)}
         onSubmit={handleAddContext}
