@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { connectToDatabase } from '@/lib/mongodb'
 import { Message } from '@/models/Message'
 import { verifyAuthToken } from '@/lib/auth'
+import { triggerPusherEvent } from '@/lib/pusher-server'
 
 export async function GET(request: NextRequest) {
   try {
@@ -58,6 +59,19 @@ export async function POST(request: NextRequest) {
       conversationId,
       sender: sender.trim(),
       content: content.trim(),
+    })
+
+    // Broadcast real-time WebSocket event via Pusher
+    await triggerPusherEvent(`chat-${conversationId}`, 'new-message', {
+      id: message._id.toString(),
+      _id: message._id.toString(),
+      roomId: conversationId,
+      conversationId,
+      authorId: sender.trim(),
+      sender: sender.trim(),
+      text: content.trim(),
+      content: content.trim(),
+      createdAt: message.createdAt,
     })
 
     return NextResponse.json({ message }, { status: 201 })

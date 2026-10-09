@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
+import { getPusherClient } from '@/lib/pusher-client'
 import {
   MAIN_ROOM_ID,
   formatTime,
@@ -160,6 +161,122 @@ export function Workspace() {
     }
   }, [])
 
+  // Real-time Pusher WebSockets listener with resilient fallback
+  useEffect(() => {
+    const pusher = getPusherClient()
+    if (!pusher) {
+      // Gracefully degraded to existing polling sync
+      return
+    }
+
+    const channelName = `chat-${activeRoomId}`.replace(/[^A-Za-z0-9_\-=@,.;]/g, '_')
+    let channel = pusher.channel(channelName)
+    if (!channel) {
+      channel = pusher.subscribe(channelName)
+    }
+
+    const handleNewMessage = (data: Record<string, unknown>) => {
+      const roomId = (data.roomId || data.conversationId || activeRoomRef.current) as string
+
+      const incoming: Message = {
+        id: (data.id || data._id || `push-${Date.now()}`) as string,
+        roomId,
+        authorId: (data.authorId || data.sender || data.senderId || 'peer') as string,
+        text: (data.text || data.content || '') as string,
+        time: (data.time || (data.createdAt ? formatTime(new Date(data.createdAt as string)) : formatTime())) as string,
+        pulseKind: data.pulseKind as Message['pulseKind'],
+      }
+
+      setMessages((current) => {
+        const roomMsgs = current[roomId] ?? []
+        // Deduplicate against existing ID
+        if (roomMsgs.some((m) => m.id === incoming.id)) {
+          return current
+        }
+
+        // Replace optimistic placeholder message if matching text & author
+        const optIndex = roomMsgs.findIndex(
+          (m) => m.text === incoming.text && m.authorId === incoming.authorId && m.id.startsWith('msg-')
+        )
+        if (optIndex !== -1) {
+          const updated = [...roomMsgs]
+          updated[optIndex] = incoming
+          return {
+            ...current,
+            [roomId]: updated,
+          }
+        }
+
+        // Deduplicate against same text & author already received
+        if (roomMsgs.some((m) => m.text === incoming.text && m.authorId === incoming.authorId)) {
+          return current
+        }
+
+        return {
+          ...current,
+          [roomId]: [...roomMsgs, incoming],
+        }
+      })
+
+      if (activeRoomRef.current !== roomId) {
+        setUnread((current) => ({ ...current, [roomId]: (current[roomId] ?? 0) + 1 }))
+      }
+    }
+
+    channel.bind('new-message', handleNewMessage)
+
+    return () => {
+      channel.unbind('new-message', handleNewMessage)
+    }
+  }, [activeRoomId])
+
+  // User personal DM real-time notifications via Pusher WebSockets
+  useEffect(() => {
+    if (!session?.userId || session?.isGuest || session?.role === 'Guest') return
+    const pusher = getPusherClient()
+    if (!pusher) return
+
+    const personalChannelName = `chat-dm-${session.userId}`.replace(/[^A-Za-z0-9_\-=@,.;]/g, '_')
+    let channel = pusher.channel(personalChannelName)
+    if (!channel) {
+      channel = pusher.subscribe(personalChannelName)
+    }
+
+    const handlePersonalDm = (data: Record<string, unknown>) => {
+      const senderId = (data.senderId || data.authorId) as string
+      if (!senderId || senderId === session.userId) return
+
+      const roomKey = `dm-${senderId}`
+      const incoming: Message = {
+        id: (data.id || data._id || `push-${Date.now()}`) as string,
+        roomId: roomKey,
+        authorId: senderId,
+        text: (data.text || data.content || '') as string,
+        time: (data.time || (data.createdAt ? formatTime(new Date(data.createdAt as string)) : formatTime())) as string,
+        pulseKind: data.pulseKind as Message['pulseKind'],
+      }
+
+      setMessages((current) => {
+        const roomMsgs = current[roomKey] ?? []
+        if (roomMsgs.some((m) => m.id === incoming.id)) return current
+        return {
+          ...current,
+          [roomKey]: [...roomMsgs, incoming],
+        }
+      })
+
+      if (activeRoomRef.current !== roomKey) {
+        setUnread((current) => ({ ...current, [roomKey]: (current[roomKey] ?? 0) + 1 }))
+      }
+    }
+
+    channel.bind('new-message', handlePersonalDm)
+
+    return () => {
+      channel.unbind('new-message', handlePersonalDm)
+    }
+  }, [session?.userId, session?.isGuest, session?.role])
+
   // 1-on-1 DIRECT MESSAGE POLLING SYNC (every 2000ms when inside an active DM thread)
   useEffect(() => {
     if (!activeRoomId.startsWith('dm-')) return
@@ -233,38 +350,52 @@ export function Workspace() {
       return
     }
 
-    // Fetch messages from MongoDB for active channel
-    fetch(`/api/messages?conversationId=${encodeURIComponent(activeRoomId)}`, {
-      headers: {
-        Authorization: `Bearer ${session.token}`,
-      },
-    })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        const rawList = Array.isArray(data) ? data : data?.messages
-        if (rawList && Array.isArray(rawList)) {
-          interface DbMsg {
-            _id?: string
-            id?: string
-            conversationId: string
-            sender: string
-            content: string
-            createdAt: string
-          }
-          const dbMsgs: Message[] = rawList.map((m: DbMsg) => ({
-            id: m._id || m.id || `db-${Date.now()}`,
-            roomId: m.conversationId,
-            authorId: m.sender,
-            text: m.content,
-            time: formatTime(new Date(m.createdAt)),
-          }))
-          setMessages((curr) => ({
-            ...curr,
-            [activeRoomId]: dbMsgs,
-          }))
-        }
+    // Fetch messages from MongoDB for active channel with resilient polling backup
+    const fetchChannelMessages = () => {
+      fetch(`/api/messages?conversationId=${encodeURIComponent(activeRoomId)}`, {
+        headers: {
+          Authorization: `Bearer ${session.token}`,
+        },
       })
-      .catch(() => {})
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          const rawList = Array.isArray(data) ? data : data?.messages
+          if (rawList && Array.isArray(rawList)) {
+            interface DbMsg {
+              _id?: string
+              id?: string
+              conversationId: string
+              sender: string
+              content: string
+              createdAt: string
+            }
+            const dbMsgs: Message[] = rawList.map((m: DbMsg) => ({
+              id: m._id || m.id || `db-${Date.now()}`,
+              roomId: m.conversationId,
+              authorId: m.sender,
+              text: m.content,
+              time: formatTime(new Date(m.createdAt)),
+            }))
+            setMessages((curr) => {
+              const currentList = curr[activeRoomId] || []
+              if (
+                currentList.length === dbMsgs.length &&
+                currentList.every((msg, idx) => msg.id === dbMsgs[idx]?.id)
+              ) {
+                return curr
+              }
+              return {
+                ...curr,
+                [activeRoomId]: dbMsgs,
+              }
+            })
+          }
+        })
+        .catch(() => {})
+    }
+
+    fetchChannelMessages()
+    const channelPollInterval = setInterval(fetchChannelMessages, 3000)
 
     // Fetch tasks from MongoDB for active channel
     fetch(`/api/tasks?conversationId=${encodeURIComponent(activeRoomId)}`)
@@ -291,6 +422,10 @@ export function Workspace() {
         }
       })
       .catch(() => {})
+
+    return () => {
+      clearInterval(channelPollInterval)
+    }
   }, [activeRoomId, session?.token, session?.isGuest, session?.role])
 
   const nextId = useCallback((prefix: string) => {

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { connectToDatabase } from '@/lib/mongodb'
 import { DirectMessage } from '@/models/DirectMessage'
 import { verifyAuthToken } from '@/lib/auth'
+import { triggerPusherEvent } from '@/lib/pusher-server'
 
 export async function GET(request: NextRequest) {
   try {
@@ -66,6 +67,32 @@ export async function POST(request: NextRequest) {
       recipientId,
       text: text.trim(),
     })
+
+    const payload = {
+      id: directMessage._id.toString(),
+      _id: directMessage._id.toString(),
+      senderId: decoded.userId,
+      authorId: decoded.userId,
+      recipientId,
+      text: text.trim(),
+      content: text.trim(),
+      createdAt: directMessage.createdAt,
+    }
+
+    // Broadcast real-time WebSocket event to both participants' DM channels
+    // User A views dm-${recipientId}, User B views dm-${senderId}
+    await Promise.all([
+      triggerPusherEvent(`chat-dm-${recipientId}`, 'new-message', {
+        ...payload,
+        roomId: `dm-${recipientId}`,
+        conversationId: `dm-${recipientId}`,
+      }),
+      triggerPusherEvent(`chat-dm-${decoded.userId}`, 'new-message', {
+        ...payload,
+        roomId: `dm-${decoded.userId}`,
+        conversationId: `dm-${decoded.userId}`,
+      }),
+    ])
 
     return NextResponse.json({ message: directMessage }, { status: 201 })
   } catch (error: unknown) {
