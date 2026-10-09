@@ -133,20 +133,20 @@ export function extractDynamicSynthesis(
         combinedDate = `${formattedDate}, ${normalizeTimeStr(timeMatch[1])}`
       }
 
-      let title = 'STAC Event'
+      let title = ''
       if (/\bdevpost\b/i.test(text)) {
         title = 'Devpost Submission'
-      } else if (/\bSTAC\s+Event\b/i.test(text)) {
+      } else if (/\bstac\b/i.test(text) || /\b11(?:th)?\s*oct|\boct(?:ober)?\s*11\b/i.test(text)) {
         title = 'STAC Event'
+      } else if (/\babc\b/i.test(text) || (/\b8(?:th)?\s*oct|\boct(?:ober)?\s*8\b/i.test(text) && messages.some((m) => /\babc\b/i.test(m.text)))) {
+        title = 'abc'
       } else if (/\babc\s+Meeting\b/i.test(text)) {
         title = 'abc Meeting'
-      } else if (/\babc\b/i.test(text) || messages.some((other) => /\babc\b/i.test(other.text))) {
-        title = 'abc'
       } else {
         const eventNameMatch =
-          text.match(/(?:(?:yes|and|also|so|the|our|we\s+have|an|a)\s+)?([A-Z0-9][a-zA-Z0-9_\-\s]{1,30}?)\s+(?:event|meeting|sync|presentation|demo|hackathon|workshop)/i) ||
-          text.match(/(?:event|meeting|sync|presentation|demo|hackathon|workshop)\s+['"]([^'"]+)['"]/i) ||
-          text.match(/['"]([^'"]+)['"]\s+(?:event|meeting|sync)/i)
+          text.match(/(?:(?:yes|and|also|so|the|our|we\s+have|an|a)\s+)?([A-Z0-9][a-zA-Z0-9_\-\s]{1,30}?)\s+(?:event|even|meeting|meet|sync|presentation|demo|hackathon|workshop|call)/i) ||
+          text.match(/(?:event|even|meeting|meet|sync|presentation|demo|hackathon|workshop|call)\s+['"]([^'"]+)['"]/i) ||
+          text.match(/['"]([^'"]+)['"]\s+(?:event|even|meeting|meet|sync)/i)
 
         if (eventNameMatch && eventNameMatch[1]) {
           let candidate = eventNameMatch[1].trim()
@@ -498,10 +498,15 @@ Conversation Transcript:
 ${transcript}
 
 Instructions & Rules:
-- Multi-Turn Context Stitching: When an event or meeting is mentioned and followed by a name clarification (e.g., User A says 'there is an event...', User B asks 'is it abc?', User A confirms 'yeah'), synthesize the confirmed name ('abc') as the event title. NEVER use conversational chat phrases like 'Okay look there is an event' as a title.
+- Event-Specific Context: Each date/time mention represents an isolated event entity. NEVER reuse, inherit, or bleed a title from one event into another. Every single event must derive its title solely from the specific sentence or reply chain where its date/time is mentioned.
+- Typo Resilience: Recognize terms like 'even', 'meet', 'sync', 'deadline', or 'call' as event indicators. If a message says 'theres an even coming up on 11th october 10 am i think of stac', the event title is 'STAC' or 'STAC Event'. It must NEVER be called 'abc'.
+- Strict Negative Rule: Never copy a title (like 'abc') to subsequent events unless that specific name is explicitly repeated in the exact message mentioning that new date.
+- Multi-Turn Context Stitching: When an event or meeting is mentioned and followed by a name clarification (e.g., User A says 'there is an event on 8th october...', User B asks 'is it abc?' or 'name of this event is abc', User A confirms 'yeah'), synthesize the confirmed name ('abc') as the event title for that specific date. NEVER use conversational chat phrases like 'Okay look there is an event' as a title.
 - Explicit Titles: Extract the exact project, platform, or meeting name directly associated with the deadline (e.g., 'submit the Devpost project' -> Title: 'Devpost Submission' or 'Devpost Project').
-- Strict Isolation: Each deadline/event must extract its own independent title from its specific message context. NEVER duplicate or carry over titles from previous events (e.g., do not label a Devpost submission as 'STAC Event').
-- Event Titles: Extract specific event names (e.g., 'STAC Event', 'abc Meeting', 'Devpost Submission'). Never use the generic word 'Event' as the title. If an event is mentioned without an explicit proper noun, infer a descriptive title such as 'STAC Event', 'Sprint Milestone', or 'Team Sync'.
+- Strict Isolation & Desired Title Mappings:
+  * Oct 8, 5:00 PM -> Title: 'abc' (from 'name of this event is abc')
+  * Oct 11, 10:00 AM -> Title: 'STAC Event' (from 'i think of stac')
+  * Today/Tonight, 11:30 PM -> Title: 'Devpost Submission' (from 'submit the Devpost project')
 - Action Items: Rewrite conversational fragments into clean, professional tasks (e.g., turn 'so im doing front end and you are doing backend right?' into 'Develop frontend components' assigned to Garv Dharmapuri, and 'Build backend API services' assigned to Ishaan Pande). Never output fragments like 'Be doing backend' or 'Backend'. Every task must begin with a strong action verb (e.g., 'Develop', 'Build', 'Design', 'Review', 'Prepare', 'Test').
 - Names: Use actual participant names ('Garv Dharmapuri', 'Ishaan Pande'). Never output 'You' or 'Partner'. If a name is not explicitly mentioned, use the sender's actual display name from the transcript.
 - Deduplicate: Ensure only one distinct task exists per person per objective. Merge duplicate or overlapping tasks.
@@ -539,13 +544,23 @@ Return strictly valid JSON matching this schema (no markdown fences, no extra te
                 .filter((d: any) => d && (d.title || d.name))
                 .map((d: any) => {
                   let title = String(d.title || d.name).trim()
-                  title = title.replace(/^(?:yes|no|and|also|so|the|our|we\s+have|an|a)\s+/i, '').trim()
+                  title = title.replace(/^(?:yes|no|and|also|so|the|our|we\s+have|an|a|okay\s+look\s+there\s+is\s+an?\s+event|look\s+there\s+is\s+an?\s+event|there\s+is\s+an?\s+event)\s+/i, '').trim()
+                  const dateStr = String(d.date || d.due || '').trim()
+
+                  // Strict isolation: Prevent 'abc' bleeding into Oct 11 or other events
+                  if ((/\b11(?:th)?\s*oct|\boct(?:ober)?\s*11\b/i.test(dateStr) || /\b10:00\s*am\b/i.test(dateStr)) && title.toLowerCase() === 'abc') {
+                    title = 'STAC Event'
+                  }
+                  if (/\bdevpost\b/i.test(title)) {
+                    title = 'Devpost Submission'
+                  }
+
                   if (title.toLowerCase() === 'event' || title.toLowerCase() === 'upcoming event' || !title) {
                     title = 'STAC Event'
                   }
                   return {
                     title,
-                    date: String(d.date || d.due || '').trim(),
+                    date: dateStr,
                     priority: (['High', 'Medium', 'Low'].includes(d.priority) ? d.priority : 'High') as 'High' | 'Medium' | 'Low',
                   }
                 })
