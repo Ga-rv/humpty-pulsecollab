@@ -29,8 +29,8 @@ export function DeadlinesTab({ converted, onConvert, deadlines }: DeadlinesTabPr
   if (deadlines && deadlines.length > 0) {
     return (
       <div className="flex flex-col gap-2.5">
-        {deadlines.map((item, idx) => {
-          const key = `dyn-deadline-${idx}-${item.title.replace(/\s+/g, '-').toLowerCase()}`
+        {deadlines.map((item) => {
+          const key = `deadline:${item.title.trim().toLowerCase()}|${(item.due || item.date || '').trim().toLowerCase()}`
           const isUrgent = item.urgency === 'URGENT' || item.priority === 'High'
           const dateText = item.due || item.date || 'TBD'
           const sourceText = item.source || 'Conversation'

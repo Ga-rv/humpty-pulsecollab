@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 import { getPusherClient } from '@/lib/pusher-client'
 import {
@@ -39,6 +39,32 @@ function toTitleCase(value: string) {
     .join(' ')
 }
 
+interface DbTask {
+  _id?: string
+  id?: string
+  title: string
+  assignee?: string
+  status?: string
+  deadline?: string
+  sourceKey?: string
+  conversationId?: string
+}
+
+function mapDbTask(t: DbTask): TrackerTask {
+  return {
+    id: String(t._id || t.id),
+    title: t.title,
+    owner: t.assignee || 'Team',
+    done: t.status === 'completed',
+    deadline: t.deadline || undefined,
+    fromPulse: true,
+    sourceKey: t.sourceKey || undefined,
+    conversationId: t.conversationId,
+  }
+}
+
+const isDbId = (id: string) => /^[0-9a-fA-F]{24}$/.test(id)
+
 function toInitials(name: string) {
   const letters = name
     .split(/\s+/)
@@ -65,13 +91,24 @@ export function Workspace() {
   const [scanKey, setScanKey] = useState(0)
   const [pulseActive, setPulseActive] = useState(false)
   const [syncedAt, setSyncedAt] = useState<number | null>(null)
-  const [converted, setConverted] = useState<Record<string, boolean>>({})
   const [tracker, setTracker] = useState<TrackerTask[]>([])
+  const trackerRef = useRef<TrackerTask[]>([])
   const [synthesisData, setSynthesisData] = useState<PulseSynthesisData | null>(null)
 
   const [authOpen, setAuthOpen] = useState(false)
   const [newChatOpen, setNewChatOpen] = useState(false)
   const [contextOpen, setContextOpen] = useState(false)
+
+  // What was already added to the tracker is derived from the saved tasks, so it survives
+  // reloads and switching rooms (instead of a throw-away in-memory flag).
+  const converted = useMemo(() => {
+    const prefix = `${activeRoomId}::`
+    const record: Record<string, boolean> = {}
+    for (const task of tracker) {
+      if (task.sourceKey?.startsWith(prefix)) record[task.sourceKey.slice(prefix.length)] = true
+    }
+    return record
+  }, [tracker, activeRoomId])
 
   const activeRoomRef = useRef(activeRoomId)
   const timers = useRef<ReturnType<typeof setTimeout>[]>([])
@@ -81,6 +118,29 @@ export function Workspace() {
   useEffect(() => {
     activeRoomRef.current = activeRoomId
   }, [activeRoomId])
+
+  useEffect(() => {
+    trackerRef.current = tracker
+  }, [tracker])
+
+  // Load THIS user's tracker once per login / page load. It does not depend on the
+  // active room or DM, so switching around never touches it.
+  useEffect(() => {
+    if (!session?.token || session.isGuest) return
+    let mounted = true
+
+    fetch('/api/tasks', { headers: { Authorization: `Bearer ${session.token}` } })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!mounted || !data?.tasks || !Array.isArray(data.tasks)) return
+        setTracker(data.tasks.map((t: DbTask) => mapDbTask(t)))
+      })
+      .catch((err) => console.warn('Failed to load tracker tasks:', err))
+
+    return () => {
+      mounted = false
+    }
+  }, [session?.token, session?.isGuest])
 
   // Restore session from localStorage on initial page load
   useEffect(() => {
@@ -481,32 +541,6 @@ export function Workspace() {
     fetchChannelMessages()
     const channelPollInterval = setInterval(fetchChannelMessages, 3000)
 
-    // Fetch tasks from MongoDB for active channel
-    fetch(`/api/tasks?conversationId=${encodeURIComponent(activeRoomId)}`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.tasks && Array.isArray(data.tasks)) {
-          interface DbTask {
-            _id?: string
-            id?: string
-            title: string
-            assignee: string
-            status: string
-            deadline?: string
-          }
-          const dbTasks: TrackerTask[] = data.tasks.map((t: DbTask) => ({
-            id: t._id || t.id || `task-${Date.now()}`,
-            title: t.title,
-            owner: t.assignee || 'Team',
-            done: t.status === 'completed',
-            deadline: t.deadline,
-            fromPulse: true,
-          }))
-          setTracker(dbTasks)
-        }
-      })
-      .catch(() => {})
-
     return () => {
       clearInterval(channelPollInterval)
     }
@@ -716,9 +750,20 @@ export function Workspace() {
     }
   }, [activeRoomId, scope, session?.token])
 
+  const authHeaders = useCallback((): Record<string, string> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (session?.token) headers['Authorization'] = `Bearer ${session.token}`
+    return headers
+  }, [session?.token])
+
+  const canPersist = Boolean(session?.token && !session?.isGuest)
+
   const handleConvert = useCallback(
     async (key: string, title: string, owner: string, deadline?: string) => {
-      setConverted((current) => ({ ...current, [key]: true }))
+      const sourceKey = `${activeRoomId}::${key}`
+      // Already in this user's tracker: do nothing (no duplicates)
+      if (trackerRef.current.some((task) => task.sourceKey === sourceKey)) return
+
       const tempId = nextId('task')
       const newTask: TrackerTask = {
         id: tempId,
@@ -727,55 +772,99 @@ export function Workspace() {
         done: false,
         fromPulse: true,
         deadline,
+        sourceKey,
+        conversationId: activeRoomId,
       }
-
       setTracker((current) => [newTask, ...current])
+
+      if (!canPersist) return // guests: local only
 
       try {
         const res = await fetch('/api/tasks', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders(),
           body: JSON.stringify({
             conversationId: activeRoomId,
             title,
             assignee: owner,
             deadline: deadline || '',
-            status: 'pending',
+            sourceKey,
           }),
         })
+        const data = await res.json().catch(() => null)
+        if (!res.ok || !data?.task) throw new Error(data?.error || `HTTP ${res.status}`)
 
-        const data = await res.json()
-        if (res.ok && data?.task) {
-          setTracker((current) =>
-            current.map((task) =>
-              task.id === tempId ? { ...task, id: data.task._id || data.task.id } : task
-            )
-          )
-        }
-      } catch (err) {
-        console.warn('Failed to persist task document to MongoDB:', err)
-      }
-    },
-    [activeRoomId, nextId],
-  )
-
-  const handleToggleTask = useCallback(async (id: string) => {
-    setTracker((current) =>
-      current.map((task) => (task.id === id ? { ...task, done: !task.done } : task))
-    )
-
-    // Call PATCH /api/tasks/[id] if valid ID
-    if (/^[0-9a-fA-F]{24}$/.test(id)) {
-      try {
-        await fetch(`/api/tasks/${id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
+        const saved = mapDbTask(data.task)
+        setTracker((current) => {
+          const replaced = current.map((task) => (task.id === tempId ? { ...task, id: saved.id } : task))
+          // never end up with the same saved task twice
+          return replaced.filter((task, i) => replaced.findIndex((t) => t.id === task.id) === i)
         })
       } catch (err) {
-        console.warn('Failed to toggle task in MongoDB:', err)
+        // Don't pretend it was saved: remove it so the button is available again
+        console.warn('Failed to save task to MongoDB:', err)
+        setTracker((current) => current.filter((task) => task.id !== tempId))
       }
+    },
+    [activeRoomId, authHeaders, canPersist, nextId],
+  )
+
+  const handleToggleTask = useCallback(
+    async (id: string) => {
+      const target = trackerRef.current.find((task) => task.id === id)
+      if (!target) return
+      const nextDone = !target.done
+
+      setTracker((current) => current.map((task) => (task.id === id ? { ...task, done: nextDone } : task)))
+
+      if (!canPersist || !isDbId(id)) return
+      try {
+        const res = await fetch(`/api/tasks/${id}`, {
+          method: 'PATCH',
+          headers: authHeaders(),
+          body: JSON.stringify({ status: nextDone ? 'completed' : 'pending' }),
+        })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      } catch (err) {
+        console.warn('Failed to update task in MongoDB, reverting:', err)
+        setTracker((current) => current.map((task) => (task.id === id ? { ...task, done: !nextDone } : task)))
+      }
+    },
+    [authHeaders, canPersist],
+  )
+
+  const handleDeleteTask = useCallback(
+    async (id: string) => {
+      const removed = trackerRef.current.find((task) => task.id === id)
+      if (!removed) return
+      setTracker((current) => current.filter((task) => task.id !== id))
+
+      if (!canPersist || !isDbId(id)) return
+      try {
+        const res = await fetch(`/api/tasks/${id}`, { method: 'DELETE', headers: authHeaders() })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      } catch (err) {
+        console.warn('Failed to delete task, restoring:', err)
+        setTracker((current) => (current.some((task) => task.id === id) ? current : [removed, ...current]))
+      }
+    },
+    [authHeaders, canPersist],
+  )
+
+  const handleClearCompleted = useCallback(async () => {
+    const removed = trackerRef.current.filter((task) => task.done)
+    if (removed.length === 0) return
+    setTracker((current) => current.filter((task) => !task.done))
+
+    if (!canPersist) return
+    try {
+      const res = await fetch('/api/tasks?completed=true', { method: 'DELETE', headers: authHeaders() })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    } catch (err) {
+      console.warn('Failed to clear completed tasks, restoring:', err)
+      setTracker((current) => [...current, ...removed.filter((r) => !current.some((t) => t.id === r.id))])
     }
-  }, [])
+  }, [authHeaders, canPersist])
 
   // 1. AUTH STATE RESET & CLEAN SESSION HANDLING
   const handleAuth = useCallback((payload: AuthPayload) => {
@@ -791,7 +880,6 @@ export function Workspace() {
     setTracker([])
     setSynthesisData(null)
     setPulseActive(false)
-    setConverted({})
     setDrawerOpen(false)
 
     const sessionData: Session = {
@@ -837,7 +925,6 @@ export function Workspace() {
     setTracker([])
     setSynthesisData(null)
     setPulseActive(false)
-    setConverted({})
     setDrawerOpen(false)
 
     setSession(GUEST_SESSION)
@@ -986,6 +1073,8 @@ export function Workspace() {
           onTabChange={setTab}
           onConvert={handleConvert}
           onToggleTask={handleToggleTask}
+          onDeleteTask={handleDeleteTask}
+          onClearCompleted={handleClearCompleted}
           onClose={() => setDrawerOpen(false)}
           synthesisData={synthesisData}
         />

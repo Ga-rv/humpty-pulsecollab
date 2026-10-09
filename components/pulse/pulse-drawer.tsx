@@ -21,6 +21,8 @@ interface PulseDrawerProps {
   onTabChange: (tab: PulseTab) => void
   onConvert: (key: string, title: string, owner: string, deadline?: string) => void
   onToggleTask: (id: string) => void
+  onDeleteTask: (id: string) => void
+  onClearCompleted: () => void
   onClose: () => void
   synthesisData?: PulseSynthesisData | null
 }
@@ -71,6 +73,8 @@ export function PulseDrawer({
   onTabChange,
   onConvert,
   onToggleTask,
+  onDeleteTask,
+  onClearCompleted,
   onClose,
   synthesisData,
 }: PulseDrawerProps) {
@@ -128,8 +132,8 @@ export function PulseDrawer({
                   <Icon className={cn('size-4', active && 'text-pulse')} aria-hidden="true" />
                   {id === 'tracker' && (
                     <span className="absolute -right-3.5 -top-2 inline-flex min-w-4 items-center justify-center rounded-full bg-pulse px-1 font-mono text-[9px] font-bold text-background">
-                      <span className="sr-only">{tracker.length} tasks</span>
-                      <span aria-hidden="true">{tracker.length}</span>
+                      <span className="sr-only">{tracker.filter((t) => !t.done).length} open tasks</span>
+                      <span aria-hidden="true">{tracker.filter((t) => !t.done).length}</span>
                     </span>
                   )}
                 </span>
@@ -163,7 +167,7 @@ export function PulseDrawer({
               decisions={synthesisData?.decisions}
             />
           ) : (
-            <TrackerTab tasks={tracker} onToggle={onToggleTask} />
+            <TrackerTab tasks={tracker} onToggle={onToggleTask} onDelete={onDeleteTask} onClearCompleted={onClearCompleted} />
           )}
         </div>
       </aside>

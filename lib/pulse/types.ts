@@ -46,6 +46,9 @@ export interface TrackerTask {
   done: boolean
   fromPulse?: boolean
   deadline?: string
+  /** `${roomId}::${stable key of the deadline/action item}`, used to remember what was already added. */
+  sourceKey?: string
+  conversationId?: string
 }
 
 export interface ActionItem {

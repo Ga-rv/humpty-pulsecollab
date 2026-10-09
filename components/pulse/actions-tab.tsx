@@ -45,8 +45,8 @@ export function ActionsTab({
   }
 
   const itemsToRender = hasActions
-    ? actionItems!.map((item, idx) => ({
-        key: `dyn-action-${idx}-${item.task.slice(0, 20).toLowerCase().replace(/\s+/g, '-')}`,
+    ? actionItems!.map((item) => ({
+        key: `action:${(item.assignee || 'unassigned').trim().toLowerCase()}|${item.task.trim().toLowerCase()}`,
         title: item.task,
         assignee: item.assignee || 'Unassigned',
         initials: getInitials(item.assignee || 'Unassigned'),
@@ -109,7 +109,7 @@ export function ActionsTab({
           </h3>
           <div className="flex flex-col gap-2">
             {unresolved!.map((question, idx) => {
-              const key = `unresolved-${idx}`
+              const key = `unresolved:${question.trim().toLowerCase()}`
               return (
                 <PulseCard key={key} className="border-dashed border-pulse/30">
                   <p className="text-[13px] leading-snug text-foreground">{question}</p>
