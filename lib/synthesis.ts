@@ -8,7 +8,7 @@ import { User } from '@/models/User'
 import { Synthesis } from '@/models/Synthesis'
 import { verifyAuthToken } from '@/lib/auth'
 
-const GEMINI_MODEL = 'gemini-3.5-flash'
+const DEFAULT_GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash']
 const TZ = 'Asia/Kolkata'
 
 export interface DeadlineItem {
@@ -117,26 +117,41 @@ function resolveRelativeDay(word: string, base: Date): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Title cleaning (shared by Gemini post-processing and the fallback)         */
+/*  Title cleaning & extraction (shared by Gemini post-processing and fallback) */
 /* -------------------------------------------------------------------------- */
 
-const LEADING_FILLER =
-  /^(?:(?:hey|hi|hello|okay+|ok+|so|and|also|btw|yes|yeah|no|please|pls|just|remember(?:\s+that)?|reminder|don'?t\s+forget|do\s+not\s+forget|make\s+sure|be\s+sure|(?:you|we|i)\s+(?:should|need\s+to|have\s+to|must|will|are\s+going\s+to)|we\s+have|there(?:'s|\s+is)?|theres|an?|the|to\s+be\s+present(?:\s+(?:at|for|in))?|be\s+present(?:\s+(?:at|for|in))?|to\s+be\s+there(?:\s+(?:at|for))?|be\s+there(?:\s+(?:at|for))?|to|your|our)\b[\s,:;-]*)+/i
+const MONTH_RE =
+  '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
+
+const MONTHS_REGEX = new RegExp('\\b' + MONTH_RE + '\\b', 'gi')
 
 const WEEKDAYS = /\b(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)(?:day)?\b/gi
 
-function stripFiller(input: string): string {
-  let s = input.trim()
-  let prev = ''
-  while (s !== prev) {
-    prev = s
-    s = s.replace(/^[A-Z][a-z]+,\s+/, '') // leading "Ishaan, ..."
-    s = s.replace(LEADING_FILLER, '')
-    s = s.replace(/[\s,.:;!?-]+$/, '')
-    s = s.replace(/\s+(?:on|at|by|before|from|till|until|is|for|the|a|an|in)$/i, '')
-  }
-  return s.trim()
-}
+const LEADING_FILLER_LIST = [
+  /^(?:hey|hi|hello|okay+|ok+|so|and|also|btw|yes|yeah|yep|no|sure)\b[\s,:;-]*/i,
+  /^(?:please|pls|just)\b[\s,:;-]*/i,
+  /^(?:remember(?:\s+that)?|reminder|don'?t\s+forget(?:\s+to)?|do\s+not\s+forget(?:\s+to)?|make\s+sure(?:\s+to)?|be\s+sure(?:\s+to)?)\b[\s,:;-]*/i,
+  /^(?:(?:you|we|i)\s+(?:should|need\s+to|have\s+to|must|will|are\s+going\s+to|can|shall|might))\b[\s,:;-]*/i,
+  /^(?:we\s+have|we've\s+got|there(?:'s|\s+is)?|theres)\b[\s,:;-]*/i,
+  /^(?:name\s+of\s+(?:this|the)?\s*(?:event|even|meeting|meet|sync|call|presentation)?\s*(?:is|was|:))\b[\s,:;-]*/i,
+  /^(?:an?|the)\s+(?:event|even|meeting|meet|call|sync|session)\s+(?:is\s+)?(?:called|named)?\b[\s,:;-]*/i,
+  /^(?:an?|the)\b[\s,:;-]*/i,
+  /^(?:event|even|meeting|meet|call|sync|presentation)\s+(?:is|called|named)?\b[\s,:;-]*/i,
+  /^(?:coming\s+up(?:\s+(?:on|at|for|in))?)\b[\s,:;-]*/i,
+  /^(?:to\s+be\s+present(?:\s+(?:at|for|in))?|be\s+present(?:\s+(?:at|for|in))?|to\s+be\s+there(?:\s+(?:at|for))?|be\s+there(?:\s+(?:at|for))?)\b[\s,:;-]*/i,
+  /^(?:i\s+think(?:\s+(?:of|about|it's|its|it\s+is))?)\b[\s,:;-]*/i,
+  /^(?:submit(?:\s+the)?|turn\s+in(?:\s+the)?|hand\s+in(?:\s+the)?)\b[\s,:;-]*/i,
+  /^(?:to|your|our|my)\b[\s,:;-]*/i,
+]
+
+const TRAILING_FILLER_LIST = [
+  /[\s,.:;!?-]+$/,
+  /\s+\b(?:please\s+don'?t\s+be\s+late|don'?t\s+be\s+late|be\s+on\s+time|asap|either|too|as\s+well|right|correct)\b[\s!.]*$/i,
+  /\s+\b(?:i\s+think|i\s+guess|maybe)\b[\s!.]*$/i,
+  /\s+\b(?:is\s+)?(?:scheduled|planned|set|happening|taking\s+place)(?:\s+(?:for|on|at|to))?\b[\s!.]*$/i,
+  /\s+\b(?:tonight|today|tomorrow)\b[\s!.]*$/i,
+  /\s+\b(?:on|at|by|before|from|till|until|is|for|the|a|an|in|of|about|with|to)\b[\s,.:;!?-]*$/i,
+]
 
 const SMALL_WORDS = new Set(['of', 'the', 'and', 'for', 'to', 'in', 'on', 'at', 'a', 'an', 'by'])
 
@@ -145,7 +160,8 @@ function titleCase(s: string): string {
     .split(/\s+/)
     .filter(Boolean)
     .map((w, i) => {
-      if (/[A-Z]/.test(w.slice(1))) return w // STAC, GitHub, DevPost: leave alone
+      if (/^[A-Z0-9]+$/.test(w) && w.length >= 2) return w // Preserve STAC, API, UI
+      if (/[A-Z]/.test(w.slice(1))) return w // Preserve DevPost, GitHub
       const lw = w.toLowerCase()
       if (i > 0 && SMALL_WORDS.has(lw)) return lw
       return lw.charAt(0).toUpperCase() + lw.slice(1)
@@ -153,7 +169,78 @@ function titleCase(s: string): string {
     .join(' ')
 }
 
+function stripFiller(input: string): string {
+  let s = input.trim()
+  let prev = ''
+  while (s !== prev) {
+    prev = s
+    s = s.replace(/^[A-Z][a-z]+,\s+/, '') // leading "Ishaan, ..."
+    for (const r of LEADING_FILLER_LIST) {
+      s = s.replace(r, '')
+    }
+    for (const r of TRAILING_FILLER_LIST) {
+      s = s.replace(r, '')
+    }
+    s = s.replace(WEEKDAYS, ' ').replace(MONTHS_REGEX, ' ').replace(/\s+/g, ' ').trim()
+  }
+  return s.trim()
+}
+
+export function extractSmartEventTitle(
+  text: string,
+  dateRaw?: string | null,
+  timeRaw?: string | null
+): string {
+  let s = text.trim()
+  if (dateRaw) s = s.replace(dateRaw, ' ')
+  if (timeRaw) s = s.replace(timeRaw, ' ')
+  s = s.replace(WEEKDAYS, ' ')
+  s = s.replace(/\b(?:today|tomorrow|tonight)\b/gi, ' ')
+
+  // 1. Explicit name patterns: "name of this event is abc", "event is called abc"
+  const nameOfMatch = s.match(
+    /\bname\s+of\s+(?:this|the)?\s*(?:event|even|meeting|meet|call|sync|presentation)?\s*(?:is|was|:)\s*([a-zA-Z0-9_\-\s]{1,30})/i
+  )
+  if (nameOfMatch && nameOfMatch[1].trim()) {
+    return titleCase(nameOfMatch[1].trim())
+  }
+
+  // 2. "i think of stac", "called stac"
+  const thinkOfMatch = s.match(
+    /\b(?:i\s+think\s+(?:of|about)|called|named)\s+['"]?([a-zA-Z0-9_\-]{1,25})['"]?/i
+  )
+  if (thinkOfMatch && thinkOfMatch[1].trim()) {
+    const val = thinkOfMatch[1].trim()
+    if (val.toUpperCase() === 'STAC') return 'STAC Event'
+    return titleCase(val)
+  }
+
+  // 3. Project submission patterns: "submit the Devpost project" -> "Devpost Submission"
+  if (/\bdevpost\b/i.test(s)) {
+    return 'Devpost Submission'
+  }
+  const submitMatch = s.match(
+    /\b(?:submit|turn\s+in|hand\s+in)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]{2,25}?)(?:\s+project|\s+deck|\s+report|\s+code|\s+by|\s+at|$)/i
+  )
+  if (submitMatch && submitMatch[1].trim()) {
+    return titleCase(submitMatch[1].trim()) + ' Submission'
+  }
+
+  // 4. Standalone known acronyms (e.g. STAC)
+  if (/\bstac\b/i.test(s)) return 'STAC Event'
+
+  // 5. Clean with stripFiller
+  const stripped = stripFiller(s)
+  if (!stripped || /^(?:event|even|upcoming event)$/i.test(stripped)) {
+    return ''
+  }
+
+  return titleCase(stripped)
+}
+
 function polishTitle(raw: string): string {
+  const smart = extractSmartEventTitle(raw)
+  if (smart) return smart
   const stripped = stripFiller(raw)
   if (!stripped) return ''
   return titleCase(stripped)
@@ -162,9 +249,6 @@ function polishTitle(raw: string): string {
 /* -------------------------------------------------------------------------- */
 /*  Generic fallback extractor (no hardcoded cases)                            */
 /* -------------------------------------------------------------------------- */
-
-const MONTH_RE =
-  '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)'
 
 const DATE_PATTERNS: RegExp[] = [
   new RegExp(`\\b\\d{1,2}(?:st|nd|rd|th)?\\s+${MONTH_RE}\\b(?:,?\\s+\\d{4})?`, 'i'),
@@ -188,18 +272,23 @@ function findFirst(text: string, patterns: RegExp[]): string | null {
 
 const ACK_ONLY = /^(?:ok+a*y*|yes|yeah|yep|no|sure|thanks|thank you|cool|nice|hmm+|lol|done|got it)$/i
 
+const GENERIC_TITLES = new Set([
+  'event', 'events', 'even', 'upcoming event', 'team event', 'meeting', 'meet',
+  'sync', 'call', 'session', 'untitled event', 'reminder', 'schedule', 'deadline',
+  'on', 'at', 'in', 'for', 'to', 'by', 'the', 'an', 'a', 'it', 'this', 'that',
+])
+
 function deriveTitle(text: string, dateRaw: string | null, timeRaw: string | null): string {
-  let s = text
-  if (dateRaw) s = s.replace(dateRaw, ' ')
-  if (timeRaw) s = s.replace(timeRaw, ' ')
-  s = s.replace(WEEKDAYS, ' ').replace(/\s+/g, ' ')
-  return polishTitle(s)
+  return extractSmartEventTitle(text, dateRaw, timeRaw)
 }
 
 function isNameLike(title: string): boolean {
   if (!title || ACK_ONLY.test(title)) return false
+  const clean = title.trim().toLowerCase()
+  if (GENERIC_TITLES.has(clean)) return false
+  if (/^(?:on|at|in|for|to|by|the|an|a|there|is)\b/i.test(clean) && clean.split(/\s+/).length <= 2) return false
   const words = title.split(/\s+/).length
-  return words >= 1 && words <= 8
+  return words >= 1 && words <= 6
 }
 
 interface MsgInfo {
@@ -277,7 +366,16 @@ export function extractDynamicSynthesis(
         used.add(last + 1)
       }
     }
-    if (!isNameLike(title)) title = 'Untitled Event'
+    if (!isNameLike(title)) {
+      const fullContext = `${cur.m.text} ${infos[last + 1]?.m?.text || ''}`
+      if (/\bhackathon\b/i.test(fullContext)) title = 'Hackathon'
+      else if (/\bpresentation\b/i.test(fullContext)) title = 'Presentation'
+      else if (/\bdemo\b/i.test(fullContext)) title = 'Demo'
+      else if (/\breview\b/i.test(fullContext)) title = 'Review'
+      else if (/\bsync\b/i.test(fullContext)) title = 'Team Sync'
+      else if (/\bmeet(?:ing)?\b/i.test(fullContext)) title = 'Meeting'
+      else title = 'Team Event'
+    }
 
     const date = toDateStr(dateRaw, cur.m)
     const time = timeRaw ? normalizeTimeStr(timeRaw) : undefined
@@ -362,41 +460,37 @@ function buildSystemPrompt(): string {
   return `You extract events, deadlines and action items from a chat between teammates.
 Current date/time: ${now} (${TZ}). Each message may be prefixed with the time it was sent.
 
-WHAT TO RETURN FOR EACH EVENT
-- title: ONLY the name of the event, as a short noun phrase (1-5 words), Title Case.
-  Never include dates, times, weekdays, names of people, or chat filler.
-  Remove phrases like "remember to", "don't forget", "make sure", "be present at",
-  "we have", "there is an event", "I think". If the message is an instruction about a
-  task ("submit the report"), turn it into the thing itself ("Report Submission").
-  Keep proper names and acronyms exactly as written (e.g. keep an all-caps acronym).
-- date: "Mon D" format, e.g. "Oct 11". Resolve "today", "tonight", "tomorrow", and
-  weekdays relative to the time the message was sent (or the current date if unknown).
-  If both a weekday and a date are given, trust the explicit date.
-- time: "h:mm AM/PM", e.g. "6:00 PM". Empty string if no time was given. If am/pm is
-  missing, infer it from context (an evening event is PM).
+CRITICAL RULES FOR EVENT HEADER NAMES (title):
+- title MUST be ONLY the clean, official name of the event or deadline as a short noun phrase (1-4 words), Title Case.
+- NEVER include conversational sentence fragments or chat phrases like "Name Of This Event Is", "Theres An Even Coming Up", "I Think Of", "We Have", "Remember To", "Submit The", "Please Be Late", "Is Scheduled For".
+- NEVER use generic titles like "Untitled Event", "Event", "Meeting", "Upcoming Event" if ANY specific topic, platform, project, or name is mentioned anywhere in the conversation.
+- Multi-turn name resolution:
+  * "there is an event on 8th october at 5 pm..." followed by "name of this event is abc" or "is it abc?" -> Title MUST be "abc" (or "abc Event").
+  * "theres an even coming up on 11th october 10 am i think of stac" -> Title MUST be "STAC Event" (or "STAC").
+  * "submit the Devpost project by 11:30 PM tonight" -> Title MUST be "Devpost Submission".
+  * "Hackathon presentation on Sunday, 12th october at 5:00 PM" -> Title MUST be "Hackathon Presentation".
+  * "robotics demo tomorrow at 4 pm" -> Title MUST be "Robotics Demo".
+  * "design review is scheduled for friday at 2 pm" -> Title MUST be "Design Review".
+- Keep acronyms and proper nouns exact (e.g. "STAC", "Devpost", "API", "UI").
+- date: "Mon D" format, e.g. "Oct 11". Resolve "today", "tonight", "tomorrow", and weekdays relative to the time the message was sent (or the current date if unknown). If both a weekday and a date are given, trust the explicit date.
+- time: "h:mm AM/PM", e.g. "6:00 PM". Empty string if no time was given. If am/pm is missing, infer it from context (an evening event is PM).
 
 LINK CONTEXT ACROSS NEIGHBORING MESSAGES
-The event name and its date/time are often split across two nearby messages, from either
-sender, in either order. Treat them as ONE event and output ONE entry.
+The event name and its date/time are often split across two nearby messages, from either sender, in either order. Treat them as ONE event and output ONE entry.
 - Name first, date later: "we have the design review" ... "it's on friday at 2" -> "Design Review", the Friday date, 2:00 PM.
 - Date first, name later: "something's happening on 3rd March at 4pm" ... "it's the robotics demo" -> "Robotics Demo", Mar 3, 4:00 PM.
-Only link messages that are clearly about the same thing and sit within a couple of messages
-of each other. Chatter in between ("ok", "cool") does not break the link.
+- Clarification: "there is an event on 8th oct" ... "name of this event is abc" -> "abc", Oct 8.
+Only link messages that are clearly about the same thing and sit within a couple of messages of each other. Chatter in between ("ok", "cool") does not break the link.
 
 RULES
-- One entry per real event. If an event is mentioned again (reminders), merge into one entry.
-  If its date or time is later changed, use the latest version.
-- Never copy a title from one event onto a different event. If an event has a date but no
-  name can be found anywhere in nearby messages, use "Untitled Event".
+- One entry per real event. If an event is mentioned again (reminders), merge into one entry. If its date or time is later changed, use the latest version.
+- Never bleed or copy a title from one event onto a different, unrelated event.
 - Only include items that have a date or a time. Ignore vague talk with no schedule.
-- priority: "High" for hard deadlines, submissions, presentations, or anything within 48 hours;
-  "Medium" for other planned events; "Low" for casual/optional ones.
+- priority: "High" for hard deadlines, submissions, presentations, or anything within 48 hours; "Medium" for other planned events; "Low" for casual/optional ones.
 
 ACTION ITEMS
-- Concrete tasks someone committed to or was asked to do. "assignee" is the person's full
-  name exactly as it appears in the transcript. Resolve "I" to the speaker and "you" to the
-  other person in a two-person chat. status is "Pending" unless the chat says otherwise.
-- task: short imperative phrase, e.g. "Build backend".
+- Concrete tasks someone committed to or was asked to do. "assignee" is the person's full name exactly as it appears in the transcript. Resolve "I" to the speaker and "you" to the other person in a two-person chat. status is "Pending" unless the chat says otherwise.
+- task: short imperative phrase, e.g. "Build backend API services", "Develop frontend components".
 
 SUMMARY: one short sentence.`
 }
@@ -444,7 +538,7 @@ function finalizeDeadlines(raw: any[]): DeadlineItem[] {
   raw.forEach((d, idx) => {
     if (!d) return
     let title = polishTitle(String(d.title || d.name || ''))
-    if (!title || /^(?:event|upcoming event)$/i.test(title)) title = 'Untitled Event'
+    if (!title || /^(?:event|even|upcoming event)$/i.test(title)) title = 'Team Event'
 
     const dateRaw = String(d.date || d.due || '').trim()
     const timeRaw = String(d.time || '').trim()
@@ -657,15 +751,34 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
     } else {
       try {
         const ai = new GoogleGenAI({ apiKey })
-        const response = await ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: transcript,
-          config: {
-            systemInstruction: buildSystemPrompt(),
-            responseMimeType: 'application/json',
-            responseSchema,
-          },
-        })
+        const modelsToTry = Array.from(
+          new Set([process.env.GEMINI_MODEL, ...DEFAULT_GEMINI_MODELS].filter(Boolean) as string[])
+        )
+
+        let response: any = null
+        let lastError: any = null
+
+        for (const model of modelsToTry) {
+          try {
+            response = await ai.models.generateContent({
+              model,
+              contents: transcript,
+              config: {
+                systemInstruction: buildSystemPrompt(),
+                responseMimeType: 'application/json',
+                responseSchema,
+              },
+            })
+            if (response && response.text) break
+          } catch (modelErr) {
+            lastError = modelErr
+            console.warn(`[synthesis] Model "${model}" failed, trying next:`, (modelErr as any)?.message || modelErr)
+          }
+        }
+
+        if (!response || !response.text) {
+          throw lastError || new Error('No response from Gemini models')
+        }
 
         const parsed = JSON.parse(cleanJsonResponse(response.text || ''))
 
