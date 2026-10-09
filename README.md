@@ -255,6 +255,6 @@ Follow these steps to test and verify all functionality in a clean environment:
 
 ---
 
-## 🛡️ License
+## 👥 Authors & Credits
 
-This project was built for team collaboration and hackathon demonstration under the [MIT License](LICENSE).
+Built with ❤️ by **Garv Dharmapuri** & **Ishaan Pande** (Team humpty) for **FIRST//COMMIT**.
