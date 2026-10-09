@@ -82,6 +82,66 @@ export function Workspace() {
     activeRoomRef.current = activeRoomId
   }, [activeRoomId])
 
+  // Restore session from localStorage on initial page load
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('pulsecollab_session')
+      if (stored) {
+        const parsed: Session = JSON.parse(stored)
+        if (parsed?.token && !parsed.isGuest) {
+          setSession(parsed)
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to restore session from localStorage:', err)
+    }
+  }, [])
+
+  // Automatically fetch saved deadlines & action items for active room/DM from MongoDB
+  useEffect(() => {
+    let isMounted = true
+
+    const headers: Record<string, string> = {}
+    if (session?.token) {
+      headers['Authorization'] = `Bearer ${session.token}`
+    }
+
+    fetch(`/api/synthesize?conversationId=${encodeURIComponent(activeRoomId)}`, { headers })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!isMounted) return
+        if (
+          data &&
+          ((Array.isArray(data.deadlines) && data.deadlines.length > 0) ||
+            (Array.isArray(data.actionItems) && data.actionItems.length > 0) ||
+            (typeof data.summary === 'string' && data.summary.trim().length > 0))
+        ) {
+          setSynthesisData({
+            deadlines: Array.isArray(data.deadlines) ? data.deadlines : [],
+            actionItems: Array.isArray(data.actionItems) ? data.actionItems : [],
+            summary: typeof data.summary === 'string' ? data.summary : '',
+            decisions: Array.isArray(data.decisions) ? data.decisions : [],
+            unresolved: Array.isArray(data.unresolved) ? data.unresolved : [],
+          })
+          setPulseActive(true)
+          if (data.updatedAt) {
+            setSyncedAt(new Date(data.updatedAt).getTime())
+          }
+        } else {
+          setSynthesisData(null)
+          setPulseActive(false)
+          setSyncedAt(null)
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to load saved room synthesis:', err)
+      })
+
+    return () => {
+      isMounted = false
+    }
+  }, [activeRoomId, session?.token])
+
   // Fetch users with existing active conversations (for sidebar)
   const fetchConversationUsers = useCallback(() => {
     if (!session?.token || session?.isGuest || session?.role === 'Guest') {
@@ -729,7 +789,7 @@ export function Workspace() {
     setConverted({})
     setDrawerOpen(false)
 
-    setSession({
+    const sessionData: Session = {
       id: payload.userId,
       userId: payload.userId,
       name,
@@ -738,7 +798,15 @@ export function Workspace() {
       role: payload.mode === 'create' ? 'Member' : 'Lead Dev',
       token: payload.token,
       isGuest: false,
-    })
+    }
+
+    try {
+      localStorage.setItem('pulsecollab_session', JSON.stringify(sessionData))
+    } catch (err) {
+      console.warn('Failed to save session to localStorage:', err)
+    }
+
+    setSession(sessionData)
 
     if (socketRef.current && socketRef.current.connected) {
       socketRef.current.emit('join_room', MAIN_ROOM_ID)
@@ -748,6 +816,12 @@ export function Workspace() {
   }, [])
 
   const handleSignOut = useCallback(() => {
+    try {
+      localStorage.removeItem('pulsecollab_session')
+    } catch (err) {
+      console.warn('Failed to remove session from localStorage:', err)
+    }
+
     // Purge DM selection & default to #first-commit-sprint
     setActiveRoomId(MAIN_ROOM_ID)
     activeRoomRef.current = MAIN_ROOM_ID

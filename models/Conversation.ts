@@ -5,6 +5,9 @@ export interface IConversation extends Document {
   type: 'channel' | 'direct'
   members: Types.ObjectId[]
   projectContext?: string
+  deadlines?: any[]
+  actionItems?: any[]
+  summary?: string
   createdAt: Date
   updatedAt: Date
 }
@@ -28,6 +31,18 @@ const ConversationSchema = new Schema<IConversation>(
       },
     ],
     projectContext: {
+      type: String,
+      default: '',
+    },
+    deadlines: {
+      type: [Schema.Types.Mixed],
+      default: [],
+    },
+    actionItems: {
+      type: [Schema.Types.Mixed],
+      default: [],
+    },
+    summary: {
       type: String,
       default: '',
     },

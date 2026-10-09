@@ -5,6 +5,7 @@ import { connectToDatabase } from '@/lib/mongodb'
 import { Message } from '@/models/Message'
 import { DirectMessage } from '@/models/DirectMessage'
 import { User } from '@/models/User'
+import { Synthesis } from '@/models/Synthesis'
 import { verifyAuthToken } from '@/lib/auth'
 
 const GEMINI_MODEL = 'gemini-3.5-flash'
@@ -511,6 +512,37 @@ function normalizeMessages(raw: any[], me: string, partner: string): ChatMessage
 
 export async function processSynthesisRequest(request: NextRequest): Promise<NextResponse> {
   try {
+    const { searchParams } = new URL(request.url)
+    const queryConvoId = searchParams.get('conversationId') || searchParams.get('roomId') || searchParams.get('channelId')
+
+    // If GET request, fetch and return saved synthesis from MongoDB
+    if (request.method === 'GET') {
+      if (queryConvoId) {
+        await connectToDatabase()
+        const saved = await Synthesis.findOne({ conversationId: queryConvoId })
+        if (saved) {
+          return NextResponse.json(
+            {
+              deadlines: saved.deadlines || [],
+              actionItems: saved.actionItems || [],
+              summary: saved.summary || '',
+              updatedAt: saved.updatedAt,
+              engine: 'saved',
+            },
+            { status: 200 }
+          )
+        }
+      }
+      return NextResponse.json(
+        {
+          deadlines: [],
+          actionItems: [],
+          summary: '',
+        },
+        { status: 200 }
+      )
+    }
+
     let body: any = {}
     try {
       body = await request.json()
@@ -522,7 +554,7 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
     const currentUserName = decoded?.username || 'Garv Dharmapuri'
     let partnerName = 'Ishaan Pande'
 
-    const conversationId: string | undefined = body?.conversationId || body?.roomId || body?.channelId
+    const conversationId: string | undefined = body?.conversationId || body?.roomId || body?.channelId || queryConvoId || undefined
 
     const rawList: any[] | null = Array.isArray(body)
       ? body
@@ -661,6 +693,25 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
           typeof parsed?.summary === 'string' && parsed.summary.trim()
             ? parsed.summary.trim()
             : `Analyzed ${validMessages.length} message(s).`
+
+        // Automatically persist synthesized deadlines & action items to MongoDB
+        if (conversationId) {
+          try {
+            await connectToDatabase()
+            await Synthesis.findOneAndUpdate(
+              { conversationId },
+              {
+                conversationId,
+                deadlines,
+                actionItems,
+                summary,
+              },
+              { upsert: true, new: true }
+            )
+          } catch (persistErr) {
+            console.warn('[synthesis] Failed to save Gemini synthesis to MongoDB:', persistErr)
+          }
+        }
 
         return NextResponse.json({ deadlines, actionItems, summary, engine: 'gemini' }, { status: 200 })
       } catch (geminiError: unknown) {
