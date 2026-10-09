@@ -7,7 +7,7 @@ import { DirectMessage } from '@/models/DirectMessage'
 import { User } from '@/models/User'
 import { verifyAuthToken } from '@/lib/auth'
 
-const GEMINI_MODEL = 'gemini-2.5-flash'
+const GEMINI_MODEL = 'gemini-3.5-flash'
 const TZ = 'Asia/Kolkata'
 
 export interface DeadlineItem {
@@ -632,8 +632,6 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
             systemInstruction: buildSystemPrompt(),
             responseMimeType: 'application/json',
             responseSchema,
-            temperature: 0,
-            thinkingConfig: { thinkingBudget: 1024 },
           },
         })
 
