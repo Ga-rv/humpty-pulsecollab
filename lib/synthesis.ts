@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { GoogleGenAI, Type } from '@google/genai'
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai'
 import mongoose from 'mongoose'
 import { connectToDatabase } from '@/lib/mongodb'
 import { Message } from '@/models/Message'
@@ -13,6 +13,7 @@ import { verifyAuthToken } from '@/lib/auth'
 // environment to override without a code change. Unknown/retired IDs are skipped automatically.
 const DEFAULT_GEMINI_MODELS = ['gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-3.8-flash']
 const TZ = 'Asia/Kolkata'
+const GEMINI_TIMEOUT_MS = 20_000
 
 export interface DeadlineItem {
   id?: string
@@ -876,6 +877,10 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
                 systemInstruction: buildSystemPrompt(),
                 responseMimeType: 'application/json',
                 responseSchema,
+                // Gemini 3 "thinks" by default, which can take a minute. Extraction doesn't need it.
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                // Never hang: give up on a model after 20s and try the next one.
+                abortSignal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
               },
             })
             if (response && response.text) {

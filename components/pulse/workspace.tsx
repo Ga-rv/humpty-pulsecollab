@@ -684,6 +684,7 @@ export function Workspace() {
 
       const res = await fetch('/api/synthesize', {
         method: 'POST',
+        signal: AbortSignal.timeout(55_000),
         headers,
         body: JSON.stringify({
           conversationId: activeRoomId,
