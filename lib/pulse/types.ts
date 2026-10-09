@@ -56,17 +56,20 @@ export interface ActionItem {
 
 export interface DeadlineItem {
   title: string
-  due: string
-  source: string
-  urgency: 'URGENT' | 'SOON'
-  calendarUrl: string
+  due?: string
+  date?: string
+  priority?: 'High' | 'Medium' | 'Low'
+  source?: string
+  urgency?: 'URGENT' | 'SOON'
+  calendarUrl?: string
 }
 
 export interface PulseSynthesisData {
-  decisions: string[]
+  decisions?: string[]
   actionItems: ActionItem[]
   deadlines: DeadlineItem[]
-  unresolved: string[]
+  unresolved?: string[]
+  summary?: string
 }
 
 export type PulseTab = 'deadlines' | 'actions' | 'tracker'

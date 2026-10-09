@@ -21,171 +21,217 @@ export interface ActionItem {
 }
 
 export interface SynthesisResponse {
-  summary: string
   deadlines: DeadlineItem[]
   actionItems: ActionItem[]
+  summary: string
   decisions?: string[]
   unresolved?: string[]
 }
 
-function buildCalendarUrl(title: string, details: string): string {
-  return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(
-    title
-  )}&details=${encodeURIComponent(details || '')}`
+interface NormalizedMessage {
+  senderName: string
+  senderId: string
+  text: string
 }
+
 
 function cleanJsonResponse(raw: string): string {
   let cleaned = raw.trim()
+  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
+  if (fenceMatch) {
+    return fenceMatch[1].trim()
+  }
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim()
   }
   return cleaned
 }
 
+function normalizeDateStr(rawDate: string): string {
+  const months: Record<string, string> = {
+    jan: 'Jan', january: 'Jan',
+    feb: 'Feb', february: 'Feb',
+    mar: 'Mar', march: 'Mar',
+    apr: 'Apr', april: 'Apr',
+    may: 'May',
+    jun: 'Jun', june: 'Jun',
+    jul: 'Jul', july: 'Jul',
+    aug: 'Aug', august: 'Aug',
+    sep: 'Sep', sept: 'Sep', september: 'Sep',
+    oct: 'Oct', october: 'Oct',
+    nov: 'Nov', november: 'Nov',
+    dec: 'Dec', december: 'Dec',
+  }
+
+  // e.g. "11th October" or "11 October"
+  const m1 = rawDate.match(/(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]+)/i)
+  if (m1) {
+    const monthKey = m1[2].toLowerCase()
+    const monthName = months[monthKey] || m1[2]
+    return `${monthName} ${m1[1]}`
+  }
+
+  // e.g. "October 11th" or "Oct 11"
+  const m2 = rawDate.match(/([a-zA-Z]+)\s+(\d{1,2})(?:st|nd|rd|th)?/i)
+  if (m2) {
+    const monthKey = m2[1].toLowerCase()
+    const monthName = months[monthKey] || m2[1]
+    return `${monthName} ${m2[2]}`
+  }
+
+  return rawDate
+}
+
+function normalizeTimeStr(rawTime: string): string {
+  const m = rawTime.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i)
+  if (m) {
+    const hour = m[1]
+    const minute = m[2] || '00'
+    const ampm = m[3] ? m[3].toUpperCase() : 'PM'
+    return `${hour}:${minute} ${ampm}`
+  }
+  return rawTime.toUpperCase()
+}
+
 /**
- * Smart heuristic/regex extractor that inspects conversation messages
- * for keywords (dates like "8th october", times like "5 pm", event names like "abc",
- * "deadline", "task", etc.) when Gemini API key is missing or calls throw.
+ * Pure dynamic extractor used when Gemini API key is missing or calls throw.
+ * Inspects the actual conversation messages and NEVER returns hardcoded strings.
  */
-export function extractHeuristicSynthesis(
-  messages: { sender: string; content: string }[]
-): SynthesisResponse {
-  const fullText = messages.map((m) => `${m.sender}: ${m.content}`).join('\n')
+export function extractDynamicSynthesis(messages: NormalizedMessage[]): SynthesisResponse {
+  const deadlines: DeadlineItem[] = []
+  const actionItems: ActionItem[] = []
 
-  // 1. Detect Event Name
-  let eventName = 'abc'
-  if (/\babc\b/i.test(fullText)) {
-    eventName = 'abc'
-  } else {
-    const eventMatch =
-      fullText.match(/event\s+['"]?([a-zA-Z0-9_\-\s]{2,30}?)['"]?(?:\s+(?:is|on|at|scheduled|before|by)|[.,!?\n]|$)/i) ||
-      fullText.match(/['"]([a-zA-Z0-9_\-\s]{2,20})['"]\s+event/i) ||
-      fullText.match(/\b(hackathon|workshop|meetup|demo|presentation|release)\b/i)
+  for (const m of messages) {
+    const sender = m.senderName || m.senderId || 'Team Member'
+    const text = m.text
 
-    if (eventMatch) {
-      eventName = eventMatch[1] ? eventMatch[1].trim() : eventMatch[0].trim()
-    }
-  }
+    // 1. Detect Deadlines & Events
+    const dateMatch =
+      text.match(/(\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{4})?)/i) ||
+      text.match(/((?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s+\d{4})?)/i) ||
+      text.match(/\b(today|tomorrow|tonight)\b/i)
 
-  // 2. Detect Date
-  let dateStr = 'Oct 8'
-  const dateMatch =
-    fullText.match(/(\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{4})?)/i) ||
-    fullText.match(/((?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s+\d{4})?)/i) ||
-    fullText.match(/\b(today|tonight|tomorrow)\b/i)
+    if (dateMatch) {
+      const rawDate = dateMatch[1] || dateMatch[0]
+      const formattedDate = normalizeDateStr(rawDate)
 
-  if (dateMatch) {
-    const rawDate = dateMatch[1] || dateMatch[0]
-    if (/8(?:th)?\s+oct(?:ober)?/i.test(rawDate) || /oct(?:ober)?\s+8(?:th)?/i.test(rawDate)) {
-      dateStr = 'Oct 8'
-    } else {
-      dateStr = rawDate
-    }
-  }
+      const timeMatch = text.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm)|11:59\s*pm|midnight|noon)/i)
+      let combinedDate = formattedDate
+      if (timeMatch) {
+        combinedDate = `${formattedDate}, ${normalizeTimeStr(timeMatch[1])}`
+      }
 
-  // 3. Detect Time
-  let timeStr = '5:00 PM'
-  const timeMatch =
-    fullText.match(/(?:at|by)?\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))/i) ||
-    fullText.match(/(?:at|by)?\s*(11:59\s*pm|midnight|noon)/i) ||
-    fullText.match(/(\d{1,2}:\d{2})/i)
+      let title = 'Upcoming Event'
+      if (/\bevent\s+(?:on|at|for|by|scheduled|in)\b/i.test(text)) {
+        title = 'Event'
+      } else {
+        const eventNameMatch =
+          text.match(/event\s+['"]([^'"]+)['"]/i) ||
+          text.match(/['"]([^'"]+)['"]\s+event/i) ||
+          text.match(/\b([A-Z][a-zA-Z0-9_\s]{2,25})\s+(?:deadline|due|event|hackathon|workshop|release)/i) ||
+          text.match(/\b(hackathon|workshop|meetup|demo|presentation|release|submission|sprint)\b/i)
 
-  if (timeMatch) {
-    const rawTime = (timeMatch[1] || timeMatch[0]).trim()
-    if (/5(?::00)?\s*pm/i.test(rawTime)) {
-      timeStr = '5:00 PM'
-    } else {
-      timeStr = rawTime.toUpperCase()
-    }
-  }
+        if (eventNameMatch) {
+          const found = eventNameMatch[1] ? eventNameMatch[1].trim() : eventNameMatch[0].trim()
+          title = found.charAt(0).toUpperCase() + found.slice(1)
+        } else if (text.toLowerCase().includes('event')) {
+          title = 'Event'
+        }
+      }
 
-  const combinedDate = `${dateStr}, ${timeStr}`
-
-  // 4. Detect Assignee
-  let assignee = 'Garv Dharmapuri'
-  if (/Garv(?:\s+Dharmapuri)?/i.test(fullText)) {
-    assignee = 'Garv Dharmapuri'
-  } else if (/Rahul(?:\s+Sharma)?/i.test(fullText)) {
-    assignee = 'Rahul Sharma'
-  } else if (/Aman(?:\s+Verma)?/i.test(fullText)) {
-    assignee = 'Aman Verma'
-  } else if (messages.length > 0 && messages[0].sender && messages[0].sender !== 'User') {
-    assignee = messages[0].sender
-  }
-
-  // 5. Detect Action Item / Task
-  let task = `Prepare event materials for ${eventName}`
-  const taskLabelMatch = fullText.match(/(?:task|todo|action item):\s*([a-zA-Z0-9_\-\s]{4,50}?(?=[.,\n]|$))/i)
-  const taskMatch =
-    taskLabelMatch ||
-    fullText.match(/(?:prepare\s+event\s+materials(?:\s+for\s+[a-zA-Z0-9_\-]+)?)/i) ||
-    fullText.match(/(?:will|to|need to|must|should)\s+([a-zA-Z0-9_\-\s]{6,50}?(?=[.,\n]|$))/i) ||
-    fullText.match(/(prepare\s+[a-zA-Z0-9_\-\s]{4,40}?(?=[.,\n]|$))/i) ||
-    fullText.match(/(complete\s+[a-zA-Z0-9_\-\s]{4,40}?(?=[.,\n]|$))/i)
-
-  if (taskMatch && taskMatch[1]) {
-    const matchedTask = taskMatch[1].trim()
-    task = matchedTask.charAt(0).toUpperCase() + matchedTask.slice(1)
-  }
-
-  const summary = `Team aligned on upcoming event '${eventName}' scheduled for October 8 at 5:00 PM.`
-
-  return {
-    summary,
-    deadlines: [
-      {
-        title: eventName,
+      deadlines.push({
+        title,
         date: combinedDate,
         priority: 'High',
-        due: combinedDate,
-        urgency: 'URGENT',
-        source: assignee || 'Conversation',
-        calendarUrl: buildCalendarUrl(eventName, combinedDate),
-      },
-    ],
-    actionItems: [
-      {
-        task,
-        assignee,
-        status: 'Pending',
-        deadline: combinedDate,
-      },
-    ],
-    decisions: [summary],
-    unresolved: [],
+      })
+    }
+
+    // 2. Detect Action Items for all parties
+    const selfPatterns = [
+      /(?:i\s+will|i'll|i\s+can|i\s+am\s+going\s+to|i'm\s+going\s+to|i\s+shall|i\s+plan\s+to)\s+([a-zA-Z0-9_\-\s]{4,60}?(?=[.,;!?\n]|$))/gi,
+      /(?:will\s+be\s+doing|doing)\s+([a-zA-Z0-9_\-\s]{4,60}?(?=[.,;!?\n]|$))/gi,
+      /(?:taking\s+care\s+of|handling|building|working\s+on)\s+([a-zA-Z0-9_\-\s]{4,60}?(?=[.,;!?\n]|$))/gi,
+    ]
+
+    for (const pat of selfPatterns) {
+      let match
+      while ((match = pat.exec(text)) !== null) {
+        const taskText = match[1]?.trim()
+        if (taskText && taskText.length > 3) {
+          const cleanTask = taskText.charAt(0).toUpperCase() + taskText.slice(1)
+          if (!actionItems.some((a) => a.task.toLowerCase() === cleanTask.toLowerCase() && a.assignee === sender)) {
+            actionItems.push({
+              task: cleanTask,
+              assignee: sender,
+              status: 'Pending',
+            })
+          }
+        }
+      }
+    }
+
+    const otherPatterns = [
+      /(?:^|[.,\n])\s*([A-Z][a-zA-Z0-9_]+)\s+(?:will|to|shall)\s+([a-zA-Z0-9_\-\s]{4,60}?(?=[.,;!?\n]|$))/g,
+      /(?:task|todo|action\s+item)\s*:\s*([a-zA-Z0-9_\-\s]{4,60}?(?=[.,;!?\n]|$))/gi,
+    ]
+
+    for (const pat of otherPatterns) {
+      let match
+      while ((match = pat.exec(text)) !== null) {
+        if (match.length === 3) {
+          const otherPerson = match[1]?.trim()
+          const otherTask = match[2]?.trim()
+          if (otherPerson && otherTask && otherTask.length > 3) {
+            const cleanTask = otherTask.charAt(0).toUpperCase() + otherTask.slice(1)
+            if (!actionItems.some((a) => a.task.toLowerCase() === cleanTask.toLowerCase() && a.assignee === otherPerson)) {
+              actionItems.push({
+                task: cleanTask,
+                assignee: otherPerson,
+                status: 'Pending',
+              })
+            }
+          }
+        } else if (match.length === 2) {
+          const explicitTask = match[1]?.trim()
+          if (explicitTask && explicitTask.length > 3) {
+            const cleanTask = explicitTask.charAt(0).toUpperCase() + explicitTask.slice(1)
+            if (!actionItems.some((a) => a.task.toLowerCase() === cleanTask.toLowerCase() && a.assignee === sender)) {
+              actionItems.push({
+                task: cleanTask,
+                assignee: sender,
+                status: 'Pending',
+              })
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Dynamic Summary
+  const participants = Array.from(new Set(messages.map((m) => m.senderName || m.senderId).filter(Boolean)))
+  let summary = ''
+  if (deadlines.length > 0 && actionItems.length > 0) {
+    summary = `Team commitments identified: ${actionItems.length} task(s) and ${deadlines.length} scheduled deadline(s) across participants (${participants.join(', ')}).`
+  } else if (actionItems.length > 0) {
+    summary = `Sprint action items recorded for ${participants.join(', ')}.`
+  } else if (deadlines.length > 0) {
+    summary = `Deadlines identified for upcoming sprint milestone(s).`
+  } else {
+    summary = `Conversation reviewed across ${participants.length > 0 ? participants.join(', ') : 'team'}.`
+  }
+
+  return {
+    deadlines,
+    actionItems,
+    summary,
   }
 }
 
 /**
- * Robust synthesis handler that NEVER throws 500 under any circumstance.
+ * Robust, dynamic synthesis handler.
  */
 export async function processSynthesisRequest(request: NextRequest): Promise<NextResponse> {
-  // Absolute fallback defaults conforming strictly to required JSON shape
-  const absoluteFallback: SynthesisResponse = {
-    deadlines: [
-      {
-        title: 'abc',
-        date: 'Oct 8, 5:00 PM',
-        priority: 'High',
-        due: 'Oct 8, 5:00 PM',
-        urgency: 'URGENT',
-        source: 'Garv Dharmapuri',
-        calendarUrl: buildCalendarUrl('abc', 'Oct 8, 5:00 PM'),
-      },
-    ],
-    actionItems: [
-      {
-        task: 'Prepare event materials for abc',
-        assignee: 'Garv Dharmapuri',
-        status: 'Pending',
-        deadline: 'Oct 8, 5:00 PM',
-      },
-    ],
-    summary: "Team aligned on upcoming event 'abc' scheduled for October 8 at 5:00 PM.",
-    decisions: ["Team aligned on upcoming event 'abc' scheduled for October 8 at 5:00 PM."],
-    unresolved: [],
-  }
-
   try {
     // 1. Extract request body safely
     let body: any = {}
@@ -195,118 +241,139 @@ export async function processSynthesisRequest(request: NextRequest): Promise<Nex
       try {
         const text = await request.text()
         if (text && text.trim()) {
-          try {
-            body = JSON.parse(text)
-          } catch {
-            body = { text }
-          }
+          body = JSON.parse(text)
         }
       } catch {
         body = {}
       }
     }
 
-    // 2. Extract conversation payload from request body
+    // 2. Dynamic message array resolution
     let rawMessages: any[] = []
-    if (Array.isArray(body)) {
-      rawMessages = body
-    } else if (Array.isArray(body?.messages)) {
+
+    if (body && typeof body === 'object' && 'messages' in body) {
+      if (!Array.isArray(body.messages) || body.messages.length === 0) {
+        return NextResponse.json(
+          { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
+          { status: 200 }
+        )
+      }
       rawMessages = body.messages
-    } else if (Array.isArray(body?.conversation)) {
+    } else if (Array.isArray(body)) {
+      if (body.length === 0) {
+        return NextResponse.json(
+          { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
+          { status: 200 }
+        )
+      }
+      rawMessages = body
+    } else if (body && typeof body === 'object' && 'conversation' in body) {
+      if (!Array.isArray(body.conversation) || body.conversation.length === 0) {
+        return NextResponse.json(
+          { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
+          { status: 200 }
+        )
+      }
       rawMessages = body.conversation
-    } else if (typeof body?.messages === 'string') {
-      rawMessages = [body.messages]
-    } else if (typeof body?.conversation === 'string') {
-      rawMessages = [body.conversation]
-    } else if (typeof body?.text === 'string') {
-      rawMessages = [body.text]
-    } else if (typeof body?.content === 'string') {
-      rawMessages = [body.content]
+    } else if (body?.conversationId) {
+      // Look up messages for conversationId from DB
+      try {
+        await connectToDatabase()
+        const dbMsgs = await Message.find({ conversationId: body.conversationId }).sort({ createdAt: 1 })
+        if (dbMsgs && dbMsgs.length > 0) {
+          rawMessages = dbMsgs.map((m) => ({
+            senderName: m.sender,
+            senderId: m.sender,
+            text: m.content,
+          }))
+        }
+      } catch (err) {
+        console.warn('DB message lookup skipped/failed:', err)
+      }
+
+      if (rawMessages.length === 0) {
+        return NextResponse.json(
+          { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
+          { status: 200 }
+        )
+      }
+    } else {
+      return NextResponse.json(
+        { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
+        { status: 200 }
+      )
     }
 
-    let extractedMessages: { sender: string; content: string }[] = rawMessages
+    // 3. Normalize messages
+    const formattedMessages: NormalizedMessage[] = rawMessages
       .map((m) => {
         if (typeof m === 'string') {
-          return { sender: 'User', content: m.trim() }
+          const parts = m.split(':')
+          if (parts.length > 1) {
+            return {
+              senderName: parts[0].trim(),
+              senderId: parts[0].trim(),
+              text: parts.slice(1).join(':').trim(),
+            }
+          }
+          return {
+            senderName: 'User',
+            senderId: 'User',
+            text: m.trim(),
+          }
         }
         if (m && typeof m === 'object') {
-          const content = m.content || m.text || m.message || ''
-          const sender = m.sender || m.authorId || m.name || m.user || 'User'
-          if (content) {
-            return { sender: String(sender), content: String(content).trim() }
+          const senderName = m.senderName || m.name || m.user || m.sender || ''
+          const senderId = m.senderId || m.authorId || senderName || 'User'
+          const text = m.text || m.content || m.message || ''
+          return {
+            senderName: senderName || senderId,
+            senderId,
+            text: String(text).trim(),
           }
         }
         return null
       })
-      .filter(Boolean) as { sender: string; content: string }[]
+      .filter((m): m is NormalizedMessage => Boolean(m && m.text.length > 0))
 
-    // 3. If request lacks messages, query last 20 messages from database
-    if (extractedMessages.length === 0) {
-      try {
-        await connectToDatabase()
-        const convId = body?.conversationId || body?.roomId || body?.channelId
-        const filter = convId ? { conversationId: convId } : {}
-        let dbMessages = await Message.find(filter).sort({ createdAt: -1 }).limit(20)
-
-        // If specific conversation had no messages, query general recent messages
-        if ((!dbMessages || dbMessages.length === 0) && convId) {
-          dbMessages = await Message.find({}).sort({ createdAt: -1 }).limit(20)
-        }
-
-        if (dbMessages && dbMessages.length > 0) {
-          extractedMessages = dbMessages.reverse().map((m) => ({
-            sender: m.sender || 'User',
-            content: m.content || '',
-          }))
-        }
-      } catch (dbErr) {
-        console.warn('Database lookup in synthesis skipped/failed:', dbErr)
-      }
+    if (formattedMessages.length === 0) {
+      return NextResponse.json(
+        { deadlines: [], actionItems: [], summary: 'No messages to synthesize.' },
+        { status: 200 }
+      )
     }
 
-    // If still empty, supply meaningful default context
-    if (extractedMessages.length === 0) {
-      extractedMessages = [
-        {
-          sender: 'Team',
-          content: "Team aligned on upcoming event 'abc' scheduled for October 8 at 5:00 PM.",
-        },
-      ]
-    }
-
-    const conversationText = extractedMessages
-      .map((m) => `${m.sender}: ${m.content}`)
+    // 4. Construct prompt dynamically with conversation text
+    const conversationText = formattedMessages
+      .map((m) => `${m.senderName || m.senderId}:${m.text}`)
       .join('\n')
 
-    // 4. Retrieve GEMINI_API_KEY
-    const apiKey = process.env.GEMINI_API_KEY
+    const prompt = `You are an AI sprint manager. Parse the following conversation and extract all deadlines and action items for every person mentioned.
 
-    // If apiKey is present, attempt Gemini 2.5 Flash call
+Conversation:
+${conversationText}
+
+Return a valid JSON object matching this schema:
+{
+  "deadlines": [
+    { "title": "string (event or deadline name)", "date": "string (e.g., Oct 11, 10:00 AM)", "priority": "High | Medium | Low" }
+  ],
+  "actionItems": [
+    { "task": "string (clear action verb + scope)", "assignee": "string (name of person responsible)", "status": "Pending" }
+  ],
+  "summary": "string (1-2 sentence overview of commitments)"
+}
+
+Rules:
+- Detect all events (e.g. if someone mentions an event on 11th October 10 AM, add it to deadlines).
+- Extract action items for ALL parties involved (e.g. if one does frontend and another does backend, create separate tasks for both assignees).
+- Return raw JSON only, no markdown backticks or commentary.`
+
+    // 5. Call official Google Gen AI SDK with gemini-2.5-flash
+    const apiKey = process.env.GEMINI_API_KEY
     if (apiKey) {
       try {
         const ai = new GoogleGenAI({ apiKey })
-        const prompt = `You are the synthesis engine for PulseCollab workspace.
-Analyze the following conversation messages:
-
-${conversationText}
-
-Extract actionable intelligence and return ONLY a valid JSON object matching this EXACT schema:
-{
-  "deadlines": [
-    { "title": "string", "date": "string", "priority": "High" | "Medium" | "Low" }
-  ],
-  "actionItems": [
-    { "task": "string", "assignee": "string", "status": "Pending" | "In Progress" | "Completed" }
-  ],
-  "summary": "string"
-}
-
-Guidelines:
-- deadlines: Array of upcoming dates/events. date should be formatted like "Oct 8, 5:00 PM". priority must be "High", "Medium", or "Low".
-- actionItems: Array of tasks. assignee should be the person mentioned or inferred. status must be "Pending", "In Progress", or "Completed".
-- summary: A concise 1-2 sentence executive summary of key agreements and milestones.
-- Return ONLY valid raw JSON with NO markdown code fences or conversational text.`
-
         const response = await ai.models.generateContent({
           model: 'gemini-2.5-flash',
           contents: prompt,
@@ -320,73 +387,57 @@ Guidelines:
         const parsed = JSON.parse(cleaned)
 
         if (parsed && typeof parsed === 'object') {
-          const deadlines: DeadlineItem[] = Array.isArray(parsed.deadlines) && parsed.deadlines.length > 0
-            ? parsed.deadlines.map((d: any) => ({
-                title: String(d.title || d.name || 'abc'),
-                date: String(d.date || d.due || 'Oct 8, 5:00 PM'),
-                priority: (['High', 'Medium', 'Low'].includes(d.priority) ? d.priority : 'High') as 'High',
-                due: String(d.date || d.due || 'Oct 8, 5:00 PM'),
-                urgency: (d.priority === 'High' ? 'URGENT' : 'SOON') as 'URGENT' | 'SOON',
-                source: String(d.source || 'Conversation'),
-                calendarUrl: buildCalendarUrl(
-                  String(d.title || 'abc'),
-                  String(d.source || d.date || 'PulseCollab')
-                ),
-              }))
-            : [
-                {
-                  title: 'abc',
-                  date: 'Oct 8, 5:00 PM',
-                  priority: 'High',
-                  due: 'Oct 8, 5:00 PM',
-                  urgency: 'URGENT',
-                  source: 'Conversation',
-                  calendarUrl: buildCalendarUrl('abc', 'Oct 8, 5:00 PM'),
-                },
-              ]
+          const deadlines: DeadlineItem[] = Array.isArray(parsed.deadlines)
+            ? parsed.deadlines
+                .filter((d: any) => d && (d.title || d.name))
+                .map((d: any) => ({
+                  title: String(d.title || d.name).trim(),
+                  date: String(d.date || d.due || '').trim(),
+                  priority: (['High', 'Medium', 'Low'].includes(d.priority) ? d.priority : 'High') as 'High' | 'Medium' | 'Low',
+                }))
+            : []
 
-          const actionItems: ActionItem[] = Array.isArray(parsed.actionItems) && parsed.actionItems.length > 0
-            ? parsed.actionItems.map((a: any) => ({
-                task: String(a.task || a.title || 'Prepare event materials for abc'),
-                assignee: String(a.assignee || 'Garv Dharmapuri'),
-                status: (['Pending', 'In Progress', 'Completed'].includes(a.status) ? a.status : 'Pending') as 'Pending',
-                deadline: String(a.deadline || a.date || 'Oct 8, 5:00 PM'),
-              }))
-            : [
-                {
-                  task: 'Prepare event materials for abc',
-                  assignee: 'Garv Dharmapuri',
-                  status: 'Pending',
-                  deadline: 'Oct 8, 5:00 PM',
-                },
-              ]
+          const actionItems: ActionItem[] = Array.isArray(parsed.actionItems)
+            ? parsed.actionItems
+                .filter((a: any) => a && (a.task || a.title))
+                .map((a: any) => ({
+                  task: String(a.task || a.title).trim(),
+                  assignee: String(a.assignee || 'Unassigned').trim(),
+                  status: (['Pending', 'In Progress', 'Completed'].includes(a.status) ? a.status : 'Pending') as 'Pending' | 'In Progress' | 'Completed',
+                }))
+            : []
 
           const summary =
             typeof parsed.summary === 'string' && parsed.summary.trim()
               ? parsed.summary.trim()
-              : "Team aligned on upcoming event 'abc' scheduled for October 8 at 5:00 PM."
+              : `Sprint commitments analyzed across ${formattedMessages.length} message(s).`
 
-          const result: SynthesisResponse = {
-            summary,
-            deadlines,
-            actionItems,
-            decisions: [summary],
-            unresolved: Array.isArray(parsed.unresolved) ? parsed.unresolved : [],
-          }
-
-          return NextResponse.json(result, { status: 200 })
+          return NextResponse.json(
+            {
+              deadlines,
+              actionItems,
+              summary,
+            },
+            { status: 200 }
+          )
         }
       } catch (geminiError: unknown) {
-        console.warn('Gemini 2.5 Flash call failed, falling back to heuristic extractor:', geminiError)
+        console.warn('Gemini 2.5 Flash call failed, using dynamic parser:', geminiError)
       }
     }
 
-    // 5. Fallback immediately to smart heuristic/regex extractor
-    const heuristicResult = extractHeuristicSynthesis(extractedMessages)
-    return NextResponse.json(heuristicResult, { status: 200 })
+    // 6. Dynamic fallback parsing (zero hardcoded strings)
+    const dynamicResult = extractDynamicSynthesis(formattedMessages)
+    return NextResponse.json(dynamicResult, { status: 200 })
   } catch (error: unknown) {
-    console.error('Safe catch-all triggered in synthesis handler:', error)
-    // NEVER respond with 500 error under any circumstance
-    return NextResponse.json(absoluteFallback, { status: 200 })
+    console.error('Safe catch-all in processSynthesisRequest:', error)
+    return NextResponse.json(
+      {
+        deadlines: [],
+        actionItems: [],
+        summary: 'No messages to synthesize.',
+      },
+      { status: 200 }
+    )
   }
 }

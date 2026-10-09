@@ -31,7 +31,9 @@ export function DeadlinesTab({ converted, onConvert, deadlines }: DeadlinesTabPr
       <div className="flex flex-col gap-2.5">
         {deadlines.map((item, idx) => {
           const key = `dyn-deadline-${idx}-${item.title.replace(/\s+/g, '-').toLowerCase()}`
-          const isUrgent = item.urgency === 'URGENT'
+          const isUrgent = item.urgency === 'URGENT' || item.priority === 'High'
+          const dateText = item.due || item.date || 'TBD'
+          const sourceText = item.source || 'Conversation'
 
           return (
             <PulseCard key={key}>
@@ -45,11 +47,11 @@ export function DeadlinesTab({ converted, onConvert, deadlines }: DeadlinesTabPr
                   {item.title}
                 </h3>
                 <StatusBadge tone={isUrgent ? 'danger' : 'pulse'}>
-                  {item.urgency}
+                  {item.urgency || item.priority || 'High'}
                 </StatusBadge>
               </div>
               <p className="font-mono text-[11px] text-muted-foreground">
-                {item.due} • Source: {item.source}
+                {dateText} • Source: {sourceText}
               </p>
               {isUrgent && (
                 <p className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
@@ -58,9 +60,16 @@ export function DeadlinesTab({ converted, onConvert, deadlines }: DeadlinesTabPr
                 </p>
               )}
               <div className="flex flex-wrap gap-1.5">
-                {item.calendarUrl && (
+                {Boolean(item.calendarUrl || item.title) && (
                   <ActionButton
-                    onClick={() => openCalendarUrl(item.calendarUrl)}
+                    onClick={() =>
+                      openCalendarUrl(
+                        item.calendarUrl ||
+                          `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(
+                            item.title
+                          )}&details=${encodeURIComponent(dateText)}`
+                      )
+                    }
                     icon={<CalendarPlus className="size-3.5" aria-hidden="true" />}
                   >
                     Add to Google Calendar
@@ -75,7 +84,7 @@ export function DeadlinesTab({ converted, onConvert, deadlines }: DeadlinesTabPr
                   Set Alert
                 </ActionButton>
                 <ActionButton
-                  onClick={() => onConvert(key, item.title, item.source, item.due)}
+                  onClick={() => onConvert(key, item.title, sourceText, dateText)}
                   active={converted[key]}
                   activeLabel="Added to Tracker"
                 >
